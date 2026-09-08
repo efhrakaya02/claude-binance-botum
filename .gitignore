@@ -1,0 +1,21 @@
+# Ortam / sırlar
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Log dosyaları
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# İşletim sistemi
+.DS_Store
