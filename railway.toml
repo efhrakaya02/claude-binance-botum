@@ -1,0 +1,12 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Bot çöktüğünde Railway otomatik yeniden başlatsın (örn. WS bağlantısı
+# beklenmedik şekilde kapanıp reconnect mantığı da tükenirse).
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+# Bu bir HTTP servisi değil (arka planda çalışan bir worker), bu yüzden
+# healthcheckPath TANIMLAMIYORUZ — Railway'in bir port bekleyip
+# bulamadığı için deploy'u "unhealthy" işaretlemesini istemiyoruz.
