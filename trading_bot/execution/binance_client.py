@@ -108,17 +108,16 @@ class BinanceFuturesTradingClient:
     # Emirler
     # ------------------------------------------------------------------ #
     async def new_market_order(self, symbol: str, side: str, quantity: float, reduce_only: bool = False) -> dict:
-        return await self._request(
-            "POST",
-            "/fapi/v1/order",
-            {
-                "symbol": symbol,
-                "side": side,           # "BUY" / "SELL"
-                "type": "MARKET",
-                "quantity": quantity,
-                "reduceOnly": "true" if reduce_only else "false",
-            },
-        )
+        params = {
+            "symbol": symbol,
+            "side": side,           # "BUY" / "SELL"
+            "type": "MARKET",
+            "quantity": quantity,
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
+            
+        return await self._request("POST", "/fapi/v1/order", params)
 
     async def new_stop_market_order(
         self, symbol: str, side: str, stop_price: float, close_position: bool = True
@@ -128,9 +127,11 @@ class BinanceFuturesTradingClient:
             "side": side,
             "type": "STOP_MARKET",
             "stopPrice": stop_price,
-            "closePosition": "true" if close_position else "false",
             "workingType": "MARK_PRICE",
         }
+        if close_position:
+            params["closePosition"] = "true"
+            
         return await self._request("POST", "/fapi/v1/order", params)
 
     async def new_take_profit_market_order(
@@ -141,9 +142,11 @@ class BinanceFuturesTradingClient:
             "side": side,
             "type": "TAKE_PROFIT_MARKET",
             "stopPrice": stop_price,
-            "closePosition": "true" if close_position else "false",
             "workingType": "MARK_PRICE",
         }
+        if close_position:
+            params["closePosition"] = "true"
+            
         return await self._request("POST", "/fapi/v1/order", params)
 
     async def cancel_order(self, symbol: str, order_id: int) -> dict:
