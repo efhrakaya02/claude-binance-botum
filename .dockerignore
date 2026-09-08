@@ -1,0 +1,22 @@
+# Sırlar image'a ASLA gömülmemeli — Railway'de env var olarak ayrı ayrı ayarlanacak
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Git / IDE / OS
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+
+# Belgeler / örnekler (imaja gerek yok ama zararı da yok; küçük tutmak için hariç bırakıyoruz)
+README.md
+trading_bot/examples/
