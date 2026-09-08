@@ -1,0 +1,255 @@
+"""
+Orchestrator: Scanner -> Analyzer -> Liquidation Engine -> Position Manager
+-> Execution Engine zincirini birbirine bağlayan ana döngü.
+
+Bu dosya "iş mantığının birleştiği yer" — her modül kendi başına test
+edilebilir kalsın diye mantığı olabildiğince ilgili modülde tuttuk;
+burada sadece akışı yönetiyoruz.
+
+BİLİNEN SADELEŞTİRMELER (üretime almadan önce gözden geçir):
+- reversal_signal / resumed_signal şu an 1m ve 5m'de pozisyon yönünün
+  TERSİNE/AYNI yönde CHoCH/BOS olup olmadığına bakan basit bir kural;
+  gerçek "zirve tespiti" hiçbir zaman kesin olamaz, bu sezgisel bir
+  yaklaşımdır ve gerçek verilerle backtest edilip ayarlanmalıdır.
+- _monitor_loop her POLL_INTERVAL_SECONDS'da bir çalışır; gerçek "anlık"
+  takip için bu süre kısaltılabilir ama Binance rate limit'lerine dikkat
+  edilmeli (özellikle stop/tp güncellemede REST çağrısı var).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from .analyzer import MultiTimeframeAnalyzer
+from .analyzer.price_action import Trend, detect_structure_break, find_swing_points
+from .config import RiskConfig
+from .data_layer import DataLayer
+from .execution import BinanceFuturesTradingClient, ExecutionEngine
+from .liquidation_engine import LiquidationEngine
+from .risk_manager import PositionManager
+from .scanner import Scanner, ScanResult
+
+logger = logging.getLogger(__name__)
+
+MONITOR_POLL_INTERVAL_SECONDS = 3.0
+SYMBOL_WARMUP_SECONDS = 5.0  # add_symbol sonrası buffer'ların dolması için kısa bekleme
+
+
+class Orchestrator:
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = False) -> None:
+        self._testnet = testnet
+        self._data_layer = DataLayer(testnet=testnet)
+        self._scanner = Scanner(self._data_layer)
+        self._analyzer = MultiTimeframeAnalyzer(self._data_layer)
+        self._liquidation_engine = LiquidationEngine(self._data_layer)
+        self._risk_cfg = RiskConfig()
+        self._position_manager = PositionManager(self._risk_cfg)
+
+        self._trading_client = BinanceFuturesTradingClient(api_key, api_secret, testnet=testnet)
+        self._execution_engine: ExecutionEngine | None = None  # trading_client __aenter__ sonrası kurulur
+
+        self._tasks: list[asyncio.Task] = []
+        self._stop_event = asyncio.Event()
+
+    async def start(self) -> None:
+        await self._data_layer.start()
+        await self._trading_client.__aenter__()
+        self._execution_engine = ExecutionEngine(self._trading_client, self._data_layer)
+
+        self._tasks.append(asyncio.create_task(self._scanner.run(self._on_candidates), name="scanner"))
+        self._tasks.append(asyncio.create_task(self._monitor_loop(), name="monitor"))
+        logger.info("Orchestrator başlatıldı (testnet=%s)", self._testnet)
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        await self._scanner.stop()
+        for t in self._tasks:
+            t.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self._data_layer.stop()
+        await self._trading_client.close()
+        logger.info("Orchestrator durduruldu")
+
+    # ------------------------------------------------------------------ #
+    # Scanner'dan gelen adaylar
+    # ------------------------------------------------------------------ #
+    async def _on_candidates(self, candidates: list[ScanResult]) -> None:
+        for c in candidates:
+            if c.symbol not in self._data_layer.watched_symbols:
+                await self._data_layer.add_symbol(c.symbol)
+                # Buffer'ların (kline geçmişi REST'ten yüklendiği için genelde
+                # anında hazır olur, ama WS'in ilk mesajları için) kısa bir
+                # ısınma payı bırakıyoruz.
+                asyncio.create_task(self._try_enter_after_warmup(c.symbol))
+            else:
+                await self._try_enter(c.symbol)
+
+    async def _try_enter_after_warmup(self, symbol: str) -> None:
+        await asyncio.sleep(SYMBOL_WARMUP_SECONDS)
+        await self._try_enter(symbol)
+
+    async def _try_enter(self, symbol: str) -> None:
+        if symbol in self._position_manager.open_positions:
+            return  # zaten açık
+
+        signal = self._analyzer.analyze(symbol)
+        if signal is None or not signal.is_actionable:
+            return
+
+        if not self._position_manager.has_free_slot():
+            # Slot doluysa: daha büyük fırsat mı, yoksa vazgeç mi kararı basitçe
+            # confidence karşılaştırmasıyla veriliyor — gerçek kullanımda bu eşik
+            # test edilerek ayarlanmalı.
+            riskiest = self._position_manager.find_riskiest_position()
+            if riskiest is None or signal.confidence < 70:
+                return
+            await self._close_position(riskiest.symbol, reason="daha_büyük_fırsat_için_slot_boşaltıldı")
+
+        entry_price = signal.suggested_entry_price
+        if entry_price is None:
+            return
+
+        safety = self._liquidation_engine.check_entry_safety(symbol, signal.side, entry_price)
+        if not safety.is_safe:
+            logger.info("%s: giriş güvensiz, atlanıyor -> %s", symbol, safety.reasons)
+            return
+
+        assert self._execution_engine is not None
+        try:
+            quantity, fill_price = await self._execution_engine.open_position(
+                symbol, signal.side, self._risk_cfg.margin_per_position_usdt, self._risk_cfg.max_leverage
+            )
+        except Exception:
+            logger.exception("%s: pozisyon açma emri başarısız", symbol)
+            return
+
+        self._position_manager.open_position(symbol, signal.side, fill_price, quantity)
+
+    async def _close_position(self, symbol: str, reason: str) -> None:
+        position = self._position_manager.open_positions.get(symbol)
+        if position is None:
+            return
+        assert self._execution_engine is not None
+        try:
+            await self._execution_engine.close_position_market(symbol, position.side, position.quantity)
+        except Exception:
+            logger.exception("%s: kapatma emri başarısız", symbol)
+            return
+        current_price = self._current_price(symbol) or position.entry_price
+        self._position_manager.close_position(symbol, current_price, reason)
+
+    # ------------------------------------------------------------------ #
+    # Açık pozisyon izleme döngüsü
+    # ------------------------------------------------------------------ #
+    async def _monitor_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await self._monitor_once()
+            except Exception:
+                logger.exception("Monitor döngüsünde hata")
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=MONITOR_POLL_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _monitor_once(self) -> None:
+        assert self._execution_engine is not None
+
+        for symbol, position in list(self._position_manager.open_positions.items()):
+            current_price = self._current_price(symbol)
+            if current_price is None:
+                continue
+
+            # 1) Sweep kontrolü — önce bu, çünkü sweep tespit edilirse diğer
+            #    trailing hesaplarını atlayıp hemen çıkıyoruz.
+            sweep = self._liquidation_engine.detect_sweep(symbol, position.side)
+            if sweep is not None:
+                logger.warning(sweep.message)
+                try:
+                    await self._execution_engine.close_position_market(symbol, position.side, position.quantity)
+                except Exception:
+                    logger.exception("%s: sweep sonrası kapatma emri başarısız", symbol)
+                    continue
+                self._position_manager.handle_sweep_exit(position, current_price)
+                continue
+
+            # 2) Ters yönde yapı kırılımı (zirve/tersine dönüş sinyali)
+            reversal_signal = self._detect_reversal(symbol, position.side)
+
+            action = self._position_manager.update_position_risk(position, current_price, reversal_signal)
+
+            if action.close_position:
+                try:
+                    await self._execution_engine.close_position_market(symbol, position.side, position.quantity)
+                except Exception:
+                    logger.exception("%s: hedef kapatma emri başarısız", symbol)
+                    continue
+                self._position_manager.close_position(symbol, current_price, action.close_reason or "target")
+                continue
+
+            if action.update_stop is not None:
+                try:
+                    await self._execution_engine.update_stop(symbol, position.side, action.update_stop)
+                except Exception:
+                    logger.exception("%s: stop güncellenemedi", symbol)
+            if action.update_tp is not None:
+                try:
+                    await self._execution_engine.update_take_profit(symbol, position.side, action.update_tp)
+                except Exception:
+                    logger.exception("%s: TP güncellenemedi", symbol)
+
+        # 3) Sweep sonrası TRACKING'deki fırsatlar: hareket devam ediyorsa yeniden gir
+        for symbol in list(self._position_manager.tracked_opportunities.keys()):
+            if not self._position_manager.has_free_slot():
+                continue
+            tracked = self._position_manager.tracked_opportunities[symbol]
+            resumed = self._detect_resumption(symbol, tracked.side)
+            if self._position_manager.should_reenter(symbol, self._current_price(symbol) or 0.0, resumed):
+                entry_price = self._current_price(symbol)
+                if entry_price is None:
+                    continue
+                safety = self._liquidation_engine.check_entry_safety(symbol, tracked.side, entry_price)
+                if not safety.is_safe:
+                    continue
+                try:
+                    quantity, fill_price = await self._execution_engine.open_position(
+                        symbol, tracked.side, self._risk_cfg.margin_per_position_usdt, self._risk_cfg.max_leverage
+                    )
+                except Exception:
+                    logger.exception("%s: yeniden giriş emri başarısız", symbol)
+                    continue
+                self._position_manager.reenter(symbol, fill_price, quantity)
+
+    # ------------------------------------------------------------------ #
+    def _current_price(self, symbol: str) -> float | None:
+        ob = self._data_layer.get_orderbook(symbol)
+        if ob is not None and ob.mid_price is not None:
+            return ob.mid_price
+        candles = self._data_layer.get_klines(symbol, "1m", limit=1)
+        return candles[-1].close if candles else None
+
+    def _detect_reversal(self, symbol: str, position_side: str) -> bool:
+        """1m ve 5m'de pozisyonun TERSİ yönde CHoCH var mı — zirve/tükeniş sezgisi."""
+        opposite_trend = Trend.DOWN if position_side == "LONG" else Trend.UP
+        prevailing = Trend.UP if position_side == "LONG" else Trend.DOWN
+        for interval in ("1m", "5m"):
+            candles = self._data_layer.get_klines(symbol, interval)
+            if not candles:
+                continue
+            swings = find_swing_points(candles, lookback=2)
+            brk = detect_structure_break(candles, swings, prevailing)
+            if brk is not None and brk.kind == "CHoCH" and brk.direction == opposite_trend:
+                return True
+        return False
+
+    def _detect_resumption(self, symbol: str, side: str) -> bool:
+        """Düzeltme sonrası hareketin kaldığı yerden (orijinal yönde) devam
+        ettiğinin sezgisi: 1m'de o yönde tekrar BOS."""
+        prevailing = Trend.UP if side == "LONG" else Trend.DOWN
+        candles = self._data_layer.get_klines(symbol, "1m")
+        if not candles:
+            return False
+        swings = find_swing_points(candles, lookback=2)
+        brk = detect_structure_break(candles, swings, prevailing)
+        return brk is not None and brk.kind == "BOS" and brk.direction == prevailing
