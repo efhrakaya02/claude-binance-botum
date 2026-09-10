@@ -117,6 +117,18 @@ class PositionManager:
         raw = self.raw_move_pct(position, current_price)
         direction = 1 if position.is_long else -1
 
+        # --- Zirve takibi (trailing aktif olsun olmasın HER tick'te) ---------
+        # "En yüksek PNL" raporlaması bu alana dayanıyor; trailing mantığından
+        # bağımsız olarak en baştan itibaren güncellenir.
+        assert position.peak_favorable_price is not None
+        is_new_peak = (
+            current_price > position.peak_favorable_price
+            if position.is_long
+            else current_price < position.peak_favorable_price
+        )
+        if is_new_peak:
+            position.peak_favorable_price = current_price
+
         # --- Breakeven ----------------------------------------------------
         if not position.breakeven_triggered and raw >= self._cfg.breakeven_trigger_pct:
             position.stop_price = position.entry_price
@@ -131,17 +143,7 @@ class PositionManager:
                 position.last_trail_price = position.entry_price * (
                     1 + direction * self._cfg.trailing_activate_pct / 100
                 )
-                position.peak_favorable_price = current_price
                 logger.info("%s: trailing aktif oldu", position.symbol)
-
-            # zirve takibi
-            is_new_peak = (
-                current_price > position.peak_favorable_price
-                if position.is_long
-                else current_price < position.peak_favorable_price
-            )
-            if is_new_peak:
-                position.peak_favorable_price = current_price
 
             # adım adım stop yükseltme: her %step ham fiyat ilerlemesinde
             # kazancın yarısını kilitle
