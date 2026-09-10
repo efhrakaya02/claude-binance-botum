@@ -79,6 +79,11 @@ olmadan) test etmen şiddetle önerilir.
    - `BINANCE_API_KEY`
    - `BINANCE_API_SECRET`
    - `BINANCE_TESTNET` → önce `true` ile test et, sonra `false` yap
+   - `DRY_RUN` → `true` ise hiçbir gerçek emir göndermez, sadece ne yapacağını
+     loglar (gerçek piyasa verisiyle, sıfır finansal risk). API key/secret
+     bile gerekmez. Botun mantığını canlı veriyle güvenle gözlemlemenin en
+     hızlı yolu budur — testnet'in aksine gerçek fiyat/hacim/likidasyon
+     davranışını görürsün.
 4. **Deployments** sekmesinden build/deploy loglarını izle. Başarılı olunca
    `Bot çalışıyor. Durdurmak için Ctrl+C.` benzeri bir log satırı görürsün
    (Railway'de Ctrl+C senin elinde değil ama log mesajı orchestrator'ın
