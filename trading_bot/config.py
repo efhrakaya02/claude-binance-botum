@@ -64,6 +64,10 @@ class RiskConfig:
     trailing_activate_pct: float = 1.5      # ham fiyat hareketi
     trailing_step_pct: float = 0.3          # her adımda tetiklenen ham fiyat artışı
     trailing_lock_ratio: float = 0.5        # her adımda kilitlenen kazanç oranı
+    # Pozisyon açıldığı andan breakeven'a (+%1) ulaşana kadar HİÇ koruma
+    # olmaması riskli — bu yüzden açılışta hemen bu kadar ham fiyat hareketinde
+    # sert (hard) bir başlangıç stop'u konuyor.
+    initial_stop_loss_pct: float = 1.0      # ham fiyat hareketi (ters yönde)
 
 
 @dataclass
