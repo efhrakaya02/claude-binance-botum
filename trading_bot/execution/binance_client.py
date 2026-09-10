@@ -108,51 +108,65 @@ class BinanceFuturesTradingClient:
     # Emirler
     # ------------------------------------------------------------------ #
     async def new_market_order(self, symbol: str, side: str, quantity: float, reduce_only: bool = False) -> dict:
-        params = {
-            "symbol": symbol,
-            "side": side,           # "BUY" / "SELL"
-            "type": "MARKET",
-            "quantity": quantity,
-        }
-        if reduce_only:
-            params["reduceOnly"] = "true"
-            
-        return await self._request("POST", "/fapi/v1/order", params)
+        return await self._request(
+            "POST",
+            "/fapi/v1/order",
+            {
+                "symbol": symbol,
+                "side": side,           # "BUY" / "SELL"
+                "type": "MARKET",
+                "quantity": quantity,
+                "reduceOnly": "true" if reduce_only else "false",
+            },
+        )
 
+    # --- Koşullu emirler (stop/TP) — ARALIK 2025'ten beri Binance bunları
+    # eski /fapi/v1/order yerine ayrı "Algo Order" endpoint'inden istiyor.
+    # Bu emirler orderId değil algoId ile tanımlanıyor ve stopPrice yerine
+    # triggerPrice parametre adını kullanıyor. Kaynak: New Algo Order (TRADE),
+    # https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Algo-Order
     async def new_stop_market_order(
         self, symbol: str, side: str, stop_price: float, close_position: bool = True
     ) -> dict:
         params = {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side,
             "type": "STOP_MARKET",
-            "stopPrice": stop_price,
+            "triggerPrice": stop_price,
+            "closePosition": "true" if close_position else "false",
             "workingType": "MARK_PRICE",
         }
-        if close_position:
-            params["closePosition"] = "true"
-            
-        return await self._request("POST", "/fapi/v1/order", params)
+        return await self._request("POST", "/fapi/v1/algoOrder", params)
 
     async def new_take_profit_market_order(
         self, symbol: str, side: str, stop_price: float, close_position: bool = True
     ) -> dict:
         params = {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side,
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": stop_price,
+            "triggerPrice": stop_price,
+            "closePosition": "true" if close_position else "false",
             "workingType": "MARK_PRICE",
         }
-        if close_position:
-            params["closePosition"] = "true"
-            
-        return await self._request("POST", "/fapi/v1/order", params)
+        return await self._request("POST", "/fapi/v1/algoOrder", params)
+
+    async def cancel_algo_order(self, algo_id: int) -> dict:
+        """Stop/TP gibi koşullu (algo) emirleri iptal eder — algoId ile, orderId ile DEĞİL."""
+        return await self._request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+
+    async def cancel_all_algo_open_orders(self, symbol: str) -> dict:
+        return await self._request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
 
     async def cancel_order(self, symbol: str, order_id: int) -> dict:
+        """Normal (algo olmayan) emirleri iptal eder — örn. market/limit giriş emirleri."""
         return await self._request("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
 
     async def cancel_all_open_orders(self, symbol: str) -> dict:
+        """Normal (algo olmayan) açık emirleri iptal eder. Algo emirleri için
+        cancel_all_algo_open_orders() ayrıca çağrılmalı."""
         return await self._request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
     async def get_position_risk(self, symbol: str) -> list[dict]:
