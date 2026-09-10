@@ -140,7 +140,12 @@ class Orchestrator:
             logger.exception("%s: pozisyon açma emri başarısız", symbol)
             return
 
-        self._position_manager.open_position(symbol, signal.side, fill_price, quantity)
+        position = self._position_manager.open_position(symbol, signal.side, fill_price, quantity)
+        if position.stop_price is not None:
+            try:
+                await self._execution_engine.update_stop(symbol, position.side, position.stop_price)
+            except Exception:
+                logger.exception("%s: başlangıç stop emri gönderilemedi", symbol)
 
     async def _close_position(self, symbol: str, reason: str) -> None:
         position = self._position_manager.open_positions.get(symbol)
@@ -235,7 +240,14 @@ class Orchestrator:
                 except Exception:
                     logger.exception("%s: yeniden giriş emri başarısız", symbol)
                     continue
-                self._position_manager.reenter(symbol, fill_price, quantity)
+                reentered_position = self._position_manager.reenter(symbol, fill_price, quantity)
+                if reentered_position.stop_price is not None:
+                    try:
+                        await self._execution_engine.update_stop(
+                            symbol, reentered_position.side, reentered_position.stop_price
+                        )
+                    except Exception:
+                        logger.exception("%s: yeniden giriş sonrası başlangıç stop emri gönderilemedi", symbol)
 
     # ------------------------------------------------------------------ #
     # Bilgilendirme amaçlı işlem takip logu (2 dakikada bir)
