@@ -46,14 +46,21 @@ async def main() -> None:
     api_key = os.environ.get("BINANCE_API_KEY")
     api_secret = os.environ.get("BINANCE_API_SECRET")
     testnet = os.environ.get("BINANCE_TESTNET", "false").lower() == "true"
+    dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
 
-    if not api_key or not api_secret:
+    if not dry_run and (not api_key or not api_secret):
         raise RuntimeError(
             "BINANCE_API_KEY / BINANCE_API_SECRET tanımlı değil. "
-            ".env dosyasını oluşturup doldurduğundan emin ol (.env.example'a bak)."
+            ".env dosyasını oluşturup doldurduğundan emin ol (.env.example'a bak). "
+            "Gerçek emir göndermeden test etmek istiyorsan DRY_RUN=true ayarlayabilirsin "
+            "— o modda API key gerekmez."
         )
+    # Dry run'da imzalı hiçbir çağrı yapılmıyor; client yine de örneklenir
+    # (kod basitliği için) ama boş anahtarlarla asla kullanılmaz.
+    api_key = api_key or "dry-run-placeholder"
+    api_secret = api_secret or "dry-run-placeholder"
 
-    orchestrator = Orchestrator(api_key=api_key, api_secret=api_secret, testnet=testnet)
+    orchestrator = Orchestrator(api_key=api_key, api_secret=api_secret, testnet=testnet, dry_run=dry_run)
     await orchestrator.start()
 
     stop_event = asyncio.Event()
