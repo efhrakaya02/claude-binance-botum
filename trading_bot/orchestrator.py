@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from .analyzer import MultiTimeframeAnalyzer
 from .analyzer.price_action import Trend, detect_structure_break, find_swing_points
@@ -38,6 +39,16 @@ SYMBOL_WARMUP_SECONDS = 5.0  # add_symbol sonrası buffer'ların dolması için 
 # sadece bilgilendirme amaçlı bir log döngüsü kullanıyoruz; onu yavaşlatmak
 # sweep tepkisini geciktirir.
 POSITION_STATUS_LOG_INTERVAL_SECONDS = 120.0
+
+# Bir sembol pozisyonu/izlenen fırsatı yoksa VE son bu kadar saniyedir
+# scanner tarafından aday olarak seçilmiyorsa izlemeden çıkarılır. add_symbol()
+# hiç geri alınmazsa watched_symbols sadece büyür ve sonunda Binance'in
+# TEK BAĞLANTI BAŞINA STREAM LİMİTİNİ (1024) aşıp sürekli kopma/yeniden
+# bağlanma döngüsüne sokar — bu yüzden budama zorunlu.
+SYMBOL_WATCH_TTL_SECONDS = 1800.0  # 30 dakika (~6 tarama döngüsü)
+# Ek güvenlik: budama gecikse bile stream sayısı asla 1024 limitine
+# yaklaşmasın diye sert bir tavan (60 sembol * 6 stream = 360 stream).
+MAX_WATCHED_SYMBOLS = 60
 
 
 class Orchestrator:
@@ -58,6 +69,8 @@ class Orchestrator:
 
         self._tasks: list[asyncio.Task] = []
         self._stop_event = asyncio.Event()
+        # symbol -> en son ne zaman scanner adayı olarak seçildiği (budama için)
+        self._symbol_last_candidate_ts: dict[str, float] = {}
 
     async def start(self) -> None:
         await self._data_layer.start()
@@ -91,15 +104,47 @@ class Orchestrator:
     # Scanner'dan gelen adaylar
     # ------------------------------------------------------------------ #
     async def _on_candidates(self, candidates: list[ScanResult]) -> None:
+        # Yeni adaylar eklenmeden ÖNCE budama yapılıyor ki uzun süredir
+        # aday olmayan/pozisyonu olmayan semboller için yer açılsın.
+        await self._prune_stale_symbols()
+
+        now = time.time()
         for c in candidates:
-            if c.symbol not in self._data_layer.watched_symbols:
-                await self._data_layer.add_symbol(c.symbol)
-                # Buffer'ların (kline geçmişi REST'ten yüklendiği için genelde
-                # anında hazır olur, ama WS'in ilk mesajları için) kısa bir
-                # ısınma payı bırakıyoruz.
-                asyncio.create_task(self._try_enter_after_warmup(c.symbol))
-            else:
+            self._symbol_last_candidate_ts[c.symbol] = now
+
+            if c.symbol in self._data_layer.watched_symbols:
                 await self._try_enter(c.symbol)
+                continue
+
+            if len(self._data_layer.watched_symbols) >= MAX_WATCHED_SYMBOLS:
+                logger.info(
+                    "%s: izleme kapasitesi dolu (%d/%d), bu tarama döngüsünde atlanıyor",
+                    c.symbol, len(self._data_layer.watched_symbols), MAX_WATCHED_SYMBOLS,
+                )
+                continue
+
+            await self._data_layer.add_symbol(c.symbol)
+            # Buffer'ların (kline geçmişi REST'ten yüklendiği için genelde
+            # anında hazır olur, ama WS'in ilk mesajları için) kısa bir
+            # ısınma payı bırakıyoruz.
+            asyncio.create_task(self._try_enter_after_warmup(c.symbol))
+
+    async def _prune_stale_symbols(self) -> None:
+        """Pozisyonu/izlenen fırsatı olmayan ve uzun süredir aday olarak
+        seçilmeyen sembolleri izlemeden çıkarır. Bu yapılmazsa watched_symbols
+        sadece büyür ve Binance'in tek bağlantı başına 1024 stream limitini
+        aşıp sürekli kopma/yeniden bağlanma döngüsüne yol açar."""
+        now = time.time()
+        for symbol in list(self._data_layer.watched_symbols):
+            if symbol in self._position_manager.open_positions:
+                continue
+            if symbol in self._position_manager.tracked_opportunities:
+                continue
+            last_seen = self._symbol_last_candidate_ts.get(symbol, 0.0)
+            if now - last_seen > SYMBOL_WATCH_TTL_SECONDS:
+                await self._data_layer.remove_symbol(symbol)
+                self._symbol_last_candidate_ts.pop(symbol, None)
+                logger.info("%s: uzun süredir aday değil, izlemeden çıkarıldı", symbol)
 
     async def _try_enter_after_warmup(self, symbol: str) -> None:
         await asyncio.sleep(SYMBOL_WARMUP_SECONDS)
