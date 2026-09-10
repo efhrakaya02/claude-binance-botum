@@ -71,6 +71,25 @@ class RiskConfig:
 
 
 @dataclass
+class AnalyzerConfig:
+    """MultiTimeframeAnalyzer ağırlıkları ve eşiği.
+
+    Eskiden 1h onayı (uyum + BOS) ve 15m/5m/1m zamanlaması ("3'ten en az 2'si")
+    KATI (all-or-nothing) eşiklerdi — sınırın hemen altında kalan geçerli
+    kurulumlar tamamen reddediliyordu. Artık her bileşen SÜREKLİ bir skora
+    (0 ile bileşenin ağırlığı arasında) dönüşüyor ve nihai karar toplam
+    confidence skorunun `actionable_confidence_threshold`'u geçip geçmediğine
+    bakılarak veriliyor — eksik kanıt diğer bileşenlerin gücüyle telafi
+    edilebiliyor, ama hâlâ gerçek yapısal/hacimsel kanıt şart.
+    """
+    macro_weight: float = 30.0     # 4h yönü net mi (bu hâlâ katı bir kapı — RANGE ise sinyal yok)
+    entry_weight: float = 35.0     # 1h uyum + BOS bileşeninin toplam ağırlığı
+    timing_weight: float = 35.0    # 15m/5m/1m hacim+momentum bileşeninin toplam ağırlığı
+    timing_target_volume_ratio: float = 1.5  # bu orana ULAŞMASA bile kısmi puan verilir
+    actionable_confidence_threshold: float = 60.0  # işlem açmak için gereken minimum toplam skor
+
+
+@dataclass
 class ScannerConfig:
     """Scanner modülü ayarları (şimdilik sabit, ileride scanner.py'ye taşınacak)."""
     top_n_gainers: int = 50
