@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 MONITOR_POLL_INTERVAL_SECONDS = 3.0
 SYMBOL_WARMUP_SECONDS = 5.0  # add_symbol sonrası buffer'ların dolması için kısa bekleme
+# Risk yönetimi (sweep/breakeven/trailing) HIZLI kalmalı — bu yüzden ayrı,
+# sadece bilgilendirme amaçlı bir log döngüsü kullanıyoruz; onu yavaşlatmak
+# sweep tepkisini geciktirir.
+POSITION_STATUS_LOG_INTERVAL_SECONDS = 120.0
 
 
 class Orchestrator:
@@ -59,6 +63,7 @@ class Orchestrator:
 
         self._tasks.append(asyncio.create_task(self._scanner.run(self._on_candidates), name="scanner"))
         self._tasks.append(asyncio.create_task(self._monitor_loop(), name="monitor"))
+        self._tasks.append(asyncio.create_task(self._position_status_log_loop(), name="position_status_log"))
         logger.info("Orchestrator başlatıldı (testnet=%s)", self._testnet)
 
     async def stop(self) -> None:
@@ -220,6 +225,50 @@ class Orchestrator:
                     logger.exception("%s: yeniden giriş emri başarısız", symbol)
                     continue
                 self._position_manager.reenter(symbol, fill_price, quantity)
+
+    # ------------------------------------------------------------------ #
+    # Bilgilendirme amaçlı işlem takip logu (2 dakikada bir)
+    # ------------------------------------------------------------------ #
+    async def _position_status_log_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._log_position_statuses()
+            except Exception:
+                logger.exception("Pozisyon durum logu yazılırken hata")
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=POSITION_STATUS_LOG_INTERVAL_SECONDS
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    def _log_position_statuses(self) -> None:
+        positions = self._position_manager.open_positions
+        if not positions:
+            logger.info("İşlem takibi: şu anda açık pozisyon yok")
+            return
+
+        lines = []
+        for symbol, position in positions.items():
+            current_price = self._current_price(symbol)
+            if current_price is None:
+                lines.append(f"  {symbol}: anlık fiyat henüz alınamadı")
+                continue
+
+            pnl_pct = self._position_manager.raw_move_pct(position, current_price)
+            peak_price = position.peak_favorable_price or position.entry_price
+            peak_pnl_pct = self._position_manager.raw_move_pct(position, peak_price)
+
+            tp_str = f"{position.tp_price:.6g}" if position.tp_price is not None else "—"
+            stop_str = f"{position.stop_price:.6g}" if position.stop_price is not None else "—"
+
+            lines.append(
+                f"  {symbol} {position.side} | giriş={position.entry_price:.6g} "
+                f"anlık={current_price:.6g} | TP={tp_str} SL={stop_str} | "
+                f"PNL(ham fiyat)=%{pnl_pct:+.2f} en_yüksek=%{peak_pnl_pct:+.2f}"
+            )
+
+        logger.info("İşlem takibi (%d açık pozisyon):\n%s", len(positions), "\n".join(lines))
 
     # ------------------------------------------------------------------ #
     def _current_price(self, symbol: str) -> float | None:
