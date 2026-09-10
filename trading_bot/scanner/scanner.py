@@ -55,6 +55,7 @@ class Scanner:
         self._cfg = cfg or ScannerConfig()
         self._state = ScannerState()
         self._stop_event = asyncio.Event()
+        self.last_scanned_count = 0  # bir önceki taramada işlenen toplam USDT-M sembol sayısı
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -66,6 +67,13 @@ class Scanner:
             try:
                 results = await self.scan_once()
                 candidates = self.select_priority_candidates(results)
+                logger.info(
+                    "Tarama tamamlandı: %d coin analiz edildi, %d coin top-50 listelerinde, "
+                    "en iyi sonuçları sağlayan %d coin için işlem öncesi kontroller yapılıyor",
+                    self.last_scanned_count,
+                    len(results),
+                    len(candidates),
+                )
                 if candidates:
                     await on_candidates(candidates)
             except Exception:
@@ -84,6 +92,7 @@ class Scanner:
         # minimum bir hacim eşiği koymuyoruz çünkü top-50 zaten bunu doğal
         # olarak filtreliyor.
         usable = [t for t in tickers if t.get("symbol", "").endswith("USDT")]
+        self.last_scanned_count = len(usable)
 
         by_gain = sorted(usable, key=lambda t: float(t["priceChangePercent"]), reverse=True)
         by_loss = sorted(usable, key=lambda t: float(t["priceChangePercent"]))
