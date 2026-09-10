@@ -28,6 +28,8 @@ class Position:
     breakeven_triggered: bool = False
     trailing_active: bool = False
     last_trail_price: float | None = None   # trailing adımlarının hesaplandığı referans ham fiyat
+    # Pozisyonun açıldığından beri ulaştığı en iyi (lehte) fiyat — trailing aktif
+    # olsun olmasın her tick'te güncellenir; "en yüksek PNL" raporlaması için kullanılır.
     peak_favorable_price: float | None = None
 
     opened_at_ms: int = 0
@@ -41,6 +43,8 @@ class Position:
     def __post_init__(self) -> None:
         if self.opened_at_ms == 0:
             self.opened_at_ms = int(time.time() * 1000)
+        if self.peak_favorable_price is None:
+            self.peak_favorable_price = self.entry_price
 
     @property
     def is_long(self) -> bool:
