@@ -25,7 +25,7 @@ from .analyzer import MultiTimeframeAnalyzer
 from .analyzer.price_action import Trend, detect_structure_break, find_swing_points
 from .config import RiskConfig
 from .data_layer import DataLayer
-from .execution import BinanceFuturesTradingClient, ExecutionEngine
+from .execution import BinanceFuturesTradingClient, DryRunExecutionEngine, ExecutionEngine
 from .liquidation_engine import LiquidationEngine
 from .risk_manager import PositionManager
 from .scanner import Scanner, ScanResult
@@ -41,8 +41,11 @@ POSITION_STATUS_LOG_INTERVAL_SECONDS = 120.0
 
 
 class Orchestrator:
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = False) -> None:
+    def __init__(
+        self, api_key: str, api_secret: str, testnet: bool = False, dry_run: bool = False
+    ) -> None:
         self._testnet = testnet
+        self._dry_run = dry_run
         self._data_layer = DataLayer(testnet=testnet)
         self._scanner = Scanner(self._data_layer)
         self._analyzer = MultiTimeframeAnalyzer(self._data_layer)
@@ -51,20 +54,27 @@ class Orchestrator:
         self._position_manager = PositionManager(self._risk_cfg)
 
         self._trading_client = BinanceFuturesTradingClient(api_key, api_secret, testnet=testnet)
-        self._execution_engine: ExecutionEngine | None = None  # trading_client __aenter__ sonrası kurulur
+        self._execution_engine: ExecutionEngine | DryRunExecutionEngine | None = None  # start() içinde kurulur
 
         self._tasks: list[asyncio.Task] = []
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
         await self._data_layer.start()
-        await self._trading_client.__aenter__()
-        self._execution_engine = ExecutionEngine(self._trading_client, self._data_layer)
+
+        if self._dry_run:
+            self._execution_engine = DryRunExecutionEngine(self._data_layer)
+            logger.warning(
+                "DRY RUN modu AKTİF — hiçbir gerçek emir gönderilmeyecek, sadece simülasyon yapılacak"
+            )
+        else:
+            await self._trading_client.__aenter__()
+            self._execution_engine = ExecutionEngine(self._trading_client, self._data_layer)
 
         self._tasks.append(asyncio.create_task(self._scanner.run(self._on_candidates), name="scanner"))
         self._tasks.append(asyncio.create_task(self._monitor_loop(), name="monitor"))
         self._tasks.append(asyncio.create_task(self._position_status_log_loop(), name="position_status_log"))
-        logger.info("Orchestrator başlatıldı (testnet=%s)", self._testnet)
+        logger.info("Orchestrator başlatıldı (testnet=%s, dry_run=%s)", self._testnet, self._dry_run)
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -73,7 +83,8 @@ class Orchestrator:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await self._data_layer.stop()
-        await self._trading_client.close()
+        if not self._dry_run:
+            await self._trading_client.close()
         logger.info("Orchestrator durduruldu")
 
     # ------------------------------------------------------------------ #
