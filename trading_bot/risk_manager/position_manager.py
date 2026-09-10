@@ -89,8 +89,15 @@ class PositionManager:
             margin_usdt=self._cfg.margin_per_position_usdt,
             leverage=self._cfg.max_leverage,
         )
+        # Breakeven'a (+%1) ulaşılana kadar korumasız kalmasın diye AÇILIŞTA
+        # hemen sert bir başlangıç stop'u konuyor.
+        direction = 1 if position.is_long else -1
+        position.stop_price = entry_price * (1 - direction * self._cfg.initial_stop_loss_pct / 100)
+
         self.open_positions[symbol] = position
-        logger.info("Pozisyon açıldı: %s %s @ %s", symbol, side, entry_price)
+        logger.info(
+            "Pozisyon açıldı: %s %s @ %s (başlangıç stop=%s)", symbol, side, entry_price, position.stop_price
+        )
         return position
 
     def close_position(self, symbol: str, close_price: float, reason: str) -> Position | None:
@@ -173,6 +180,29 @@ class PositionManager:
         if position.trailing_active and reversal_signal:
             action.close_position = True
             action.close_reason = "reversal_signal (zirve tespit edildi)"
+
+        # --- Dahili stop/TP geçiş kontrolü -----------------------------------
+        # KRİTİK: Buraya kadar hesaplanan stop_price/tp_price sadece Binance'e
+        # gönderilen bir emrin fiyatı. Eğer o emir gönderilemediyse (API hatası,
+        # dry-run modu, vb.) fiyat o seviyeyi geçtiğinde HİÇBİR ŞEY pozisyonu
+        # kapatmaz. Bu yüzden botun kendisi de, dış emirden tamamen bağımsız
+        # olarak, her tick'te "fiyat kendi stop/TP'mi geçti mi" diye kontrol
+        # ediyor ve gerekiyorsa kapatma kararı veriyor.
+        if not action.close_position and position.stop_price is not None:
+            stop_hit = current_price <= position.stop_price if position.is_long else current_price >= position.stop_price
+            if stop_hit:
+                action.close_position = True
+                action.close_reason = f"stop_price_reached (dahili kontrol, stop={position.stop_price:.8g})"
+                logger.warning(
+                    "%s: fiyat stop seviyesini geçti (dahili kontrol) stop=%s anlık=%s",
+                    position.symbol, position.stop_price, current_price,
+                )
+
+        if not action.close_position and position.tp_price is not None and position.trailing_active:
+            tp_hit = current_price >= position.tp_price if position.is_long else current_price <= position.tp_price
+            if tp_hit:
+                action.close_position = True
+                action.close_reason = f"tp_price_reached (dahili kontrol, tp={position.tp_price:.8g})"
 
         return action
 
