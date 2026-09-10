@@ -72,7 +72,7 @@ class ScannerConfig:
     top_n_gainers: int = 50
     top_n_losers: int = 50
     top_n_volume: int = 50
-    rescan_interval_seconds: int = 15
+    rescan_interval_seconds: int = 300  # 5 dakika
 
 
 @dataclass
