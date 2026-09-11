@@ -52,6 +52,9 @@ class DryRunExecutionEngine:
     async def update_take_profit(self, symbol: str, side: str, new_tp_price: float) -> None:
         logger.info("[DRY RUN] %s: TP güncellendi (simüle) -> %s", symbol, new_tp_price)
 
+    async def cancel_open_orders(self, symbol: str) -> None:
+        logger.info("[DRY RUN] %s: açık emirler temizlendi (simüle)", symbol)
+
     def _reference_price(self, symbol: str) -> float | None:
         ob = self._data_layer.get_orderbook(symbol)
         if ob is not None and ob.mid_price is not None:
