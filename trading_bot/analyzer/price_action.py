@@ -125,3 +125,24 @@ def momentum_roc(candles: list[Candle], periods: int = 5) -> float:
     if past == 0:
         return 0.0
     return (now - past) / past * 100
+
+
+def compute_atr(candles: list[Candle], period: int = 14) -> float | None:
+    """Average True Range — basit hareketli ortalama ile (Wilder'ın üstel
+    düzeltmesi değil, daha basit ve yeterince sağlam bir varyant).
+
+    True Range = max(bugünkü_high - bugünkü_low, |high - önceki_close|,
+    |low - önceki_close|). ATR bunların son `period` tanesinin ortalaması.
+
+    Yetersiz veri varsa None döner — çağıran taraf bunu (ör. sabit bir
+    yedek mesafe kullanarak) ele almalı."""
+    if len(candles) < period + 1:
+        return None
+    true_ranges = []
+    for i in range(1, len(candles)):
+        c = candles[i]
+        prev_close = candles[i - 1].close
+        tr = max(c.high - c.low, abs(c.high - prev_close), abs(c.low - prev_close))
+        true_ranges.append(tr)
+    recent = true_ranges[-period:]
+    return sum(recent) / len(recent)
