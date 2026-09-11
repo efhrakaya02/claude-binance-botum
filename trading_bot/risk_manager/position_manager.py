@@ -6,14 +6,17 @@ gönderimi Execution Engine'in işi. Orchestrator, her fiyat güncellemesinde
 `update_position_risk()` çağırır ve dönen RiskAction'a göre Execution
 Engine'e stop/tp güncelle veya pozisyonu kapat talimatı verir.
 
-Uygulanan kurallar (kullanıcının tarif ettiği mantık):
-- Ham fiyatta +%1 hareket -> stop breakeven'a çekilir (risk sıfırlanır).
-- Ham fiyatta +%1.5 hareket -> trailing stop devreye girer.
-- Trailing aktifken stop her zaman "zirvenin (girişten itibaren kat edilen
-  en yüksek ham fiyat mesafesinin) %60'ı" seviyesinde tutulur — zirve
-  yükseldikçe stop da doğrudan o oranda yükselir, asla geri gitmez.
-- Runway (momentum) devam ettiği sürece TP de stop ile birlikte yükselir;
-  tersine dönüş sinyali geldiğinde en yüksek kazançla kapatılır.
+Uygulanan kurallar (üç fazlı ATR bazlı stop mantığı):
+- Faz A (0% -> trailing_activate_pct=%1.5): SABİT, ATR bazlı başlangıç stop'u
+  (entry_price ± ATR*atr_multiplier) — coin'in kendi volatilitesine göre.
+- Faz B (%1.5 -> breakeven_trigger_pct=%2.5): ATR bazlı TRAILING stop — anlık
+  fiyatı ATR*atr_multiplier mesafeden takip eder, sadece lehte günceller.
+- Faz C (%2.5'ten itibaren): stop en az breakeven'a zorlanır, ardından
+  "stop = zirvenin trailing_lock_ratio (%60) kadarı" formülüyle kâr kademe
+  kademe kilitlenir — zirve yükseldikçe stop da yükselir, asla geri gitmez.
+  (Örn: zirve tam %3'e ulaştığında stop = entry + %3*0.6 = kârın %60'ı kilitli.)
+- Runway (momentum) devam ettiği sürece TP de zirveyle birlikte yükselir;
+  tersine dönüş sinyali geldiğinde en yüksek kazançla market'ten kapatılır.
 - Short pozisyonlarda aynı mantık ters yönde uygulanır.
 
 NOT: "Zirve tespiti" burada, dışarıdan (Analyzer'dan) gelen bir
@@ -69,7 +72,7 @@ class PositionManager:
         return self.open_count < self._cfg.max_concurrent_positions
 
     def find_riskiest_position(self) -> Position | None:
-        """3 slot doluyken daha büyük bir fırsat çıkarsa kapatılacak aday:
+        """Slotlar doluyken daha büyük bir fırsat çıkarsa kapatılacak aday:
         henüz breakeven'a bile ulaşmamış (en zayıf durumdaki) pozisyon."""
         candidates = [p for p in self.open_positions.values() if not p.breakeven_triggered]
         if not candidates:
@@ -80,7 +83,7 @@ class PositionManager:
         return min(candidates, key=lambda p: p.peak_favorable_price or p.entry_price)
 
     def open_position(
-        self, symbol: str, side: str, entry_price: float, quantity: float
+        self, symbol: str, side: str, entry_price: float, quantity: float, atr: float
     ) -> Position:
         position = Position(
             symbol=symbol,
@@ -89,15 +92,18 @@ class PositionManager:
             quantity=quantity,
             margin_usdt=self._cfg.margin_per_position_usdt,
             leverage=self._cfg.max_leverage,
+            atr=atr,
         )
-        # Breakeven'a (+%1) ulaşılana kadar korumasız kalmasın diye AÇILIŞTA
-        # hemen sert bir başlangıç stop'u konuyor.
+        # Faz A: breakeven/kâr kilitleme fazlarına ulaşılana kadar korumasız
+        # kalmasın diye AÇILIŞTA hemen ATR bazlı bir başlangıç stop'u konuyor.
+        # Sabit bir yüzde yerine coin'in kendi volatilitesine göre ayarlanır.
         direction = 1 if position.is_long else -1
-        position.stop_price = entry_price * (1 - direction * self._cfg.initial_stop_loss_pct / 100)
+        position.stop_price = entry_price - direction * atr * self._cfg.atr_multiplier
 
         self.open_positions[symbol] = position
         logger.info(
-            "Pozisyon açıldı: %s %s @ %s (başlangıç stop=%s)", symbol, side, entry_price, position.stop_price
+            "Pozisyon açıldı: %s %s @ %s (ATR=%s, başlangıç stop=%s)",
+            symbol, side, entry_price, atr, position.stop_price,
         )
         return position
 
@@ -137,26 +143,42 @@ class PositionManager:
         if is_new_peak:
             position.peak_favorable_price = current_price
 
-        # --- Breakeven ----------------------------------------------------
-        if not position.breakeven_triggered and raw >= self._cfg.breakeven_trigger_pct:
-            position.stop_price = position.entry_price
-            position.breakeven_triggered = True
-            action.update_stop = position.stop_price
-            logger.info("%s: breakeven tetiklendi, stop=%s", position.symbol, position.stop_price)
-
-        # --- Trailing aktivasyonu ------------------------------------------
-        if raw >= self._cfg.trailing_activate_pct:
+        # --- Faz B: ATR bazlı trailing (trailing_activate_pct -> breakeven_trigger_pct) ---
+        if self._cfg.trailing_activate_pct <= raw < self._cfg.breakeven_trigger_pct:
             if not position.trailing_active:
                 position.trailing_active = True
-                logger.info("%s: trailing aktif oldu", position.symbol)
+                logger.info("%s: ATR trailing (Faz B) aktif oldu", position.symbol)
 
-            # Stop her zaman zirvenin (girişten itibaren kat edilen en yüksek
-            # ham fiyat mesafesinin) trailing_lock_ratio kadarında tutulur.
-            # Zirve sadece yükselebildiği için (yukarıdaki takip bloğu) bu stop
-            # da yalnızca yükselir, asla geri gitmez.
+            # Stop, anlık fiyatı ATR*atr_multiplier mesafeden takip eder —
+            # ama SADECE lehte yönde günceller, asla geri gitmez.
+            atr_distance = position.atr * self._cfg.atr_multiplier
+            candidate_stop = current_price - direction * atr_distance
+            if position.stop_price is None or (
+                candidate_stop > position.stop_price if position.is_long else candidate_stop < position.stop_price
+            ):
+                position.stop_price = candidate_stop
+                action.update_stop = position.stop_price
+
+        # --- Faz C: breakeven zorlaması + kademeli kâr kilitleme (breakeven_trigger_pct'ten itibaren) ---
+        if raw >= self._cfg.breakeven_trigger_pct:
+            if not position.trailing_active:
+                position.trailing_active = True
+            if not position.breakeven_triggered:
+                position.breakeven_triggered = True
+                logger.info("%s: breakeven zorlaması + kâr kilitleme (Faz C) başladı", position.symbol)
+
+            # Stop = zirvenin (girişten itibaren kat edilen en yüksek ham fiyat
+            # mesafesinin) trailing_lock_ratio kadarı. Zirve sadece yükselebildiği
+            # için (yukarıdaki takip bloğu) bu da yalnızca yükselir. Ayrıca hiçbir
+            # zaman breakeven'ın (entry_price) altına düşmez.
             peak_move = abs(position.peak_favorable_price - position.entry_price)
             locked_distance = peak_move * self._cfg.trailing_lock_ratio
-            new_stop = position.entry_price + direction * locked_distance
+            candidate_stop = position.entry_price + direction * locked_distance
+            floor_stop = position.entry_price  # breakeven — asla bunun altı olmaz
+            new_stop = candidate_stop if (
+                candidate_stop > floor_stop if position.is_long else candidate_stop < floor_stop
+            ) else floor_stop
+
             if position.stop_price is None or (
                 new_stop > position.stop_price if position.is_long else new_stop < position.stop_price
             ):
@@ -165,8 +187,7 @@ class PositionManager:
 
             # TP, runway devam ettikçe zirveyle birlikte uzatılır (yumuşak hedef;
             # gerçek kapanış tetikleyicisi reversal_signal'dır).
-            runway = peak_move
-            position.tp_price = position.peak_favorable_price + direction * runway * 0.5
+            position.tp_price = position.peak_favorable_price + direction * peak_move * 0.5
             action.update_tp = position.tp_price
 
         # --- Zirve / tersine dönüş: en yüksek kazançla kapat -----------------
@@ -222,9 +243,9 @@ class PositionManager:
         tracked = self.tracked_opportunities.get(symbol)
         return tracked is not None and resumed_signal
 
-    def reenter(self, symbol: str, entry_price: float, quantity: float) -> Position:
+    def reenter(self, symbol: str, entry_price: float, quantity: float, atr: float) -> Position:
         tracked = self.tracked_opportunities.pop(symbol, None)
-        position = self.open_position(symbol, tracked.side if tracked else "LONG", entry_price, quantity)
+        position = self.open_position(symbol, tracked.side if tracked else "LONG", entry_price, quantity, atr)
         position.reentry_count = (tracked.original_position.reentry_count + 1) if tracked else 1
         logger.info("%s: fırsat kaldığı yerden devam ediyor, yeniden giriş #%d", symbol, position.reentry_count)
         return position
