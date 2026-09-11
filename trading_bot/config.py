@@ -62,8 +62,11 @@ class RiskConfig:
     margin_mode: str = "ISOLATED"
     breakeven_trigger_pct: float = 1.0      # ham fiyat hareketi
     trailing_activate_pct: float = 1.5      # ham fiyat hareketi
-    trailing_step_pct: float = 0.3          # her adımda tetiklenen ham fiyat artışı
-    trailing_lock_ratio: float = 0.5        # her adımda kilitlenen kazanç oranı
+    # Trailing aktifken stop her zaman "zirvenin (girişten itibaren kat edilen
+    # en yüksek ham fiyat mesafesinin) bu oranı" seviyesinde tutulur. Zirve
+    # sadece yükselebildiği için stop da sadece yükselir, asla geri gitmez.
+    # Örn: zirve +%8, trailing_lock_ratio=0.6 -> stop entry'nin +%4.8 üzerinde.
+    trailing_lock_ratio: float = 0.6
     # Pozisyon açıldığı andan breakeven'a (+%1) ulaşana kadar HİÇ koruma
     # olmaması riskli — bu yüzden açılışta hemen bu kadar ham fiyat hareketinde
     # sert (hard) bir başlangıç stop'u konuyor.
