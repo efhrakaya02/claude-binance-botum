@@ -9,8 +9,9 @@ Engine'e stop/tp güncelle veya pozisyonu kapat talimatı verir.
 Uygulanan kurallar (kullanıcının tarif ettiği mantık):
 - Ham fiyatta +%1 hareket -> stop breakeven'a çekilir (risk sıfırlanır).
 - Ham fiyatta +%1.5 hareket -> trailing stop devreye girer.
-- Trailing aktifken her +%0.3 ham fiyat artışında, o adımda oluşan kazancın
-  YARISI stop'a kilitlenir (stop o kadar yükselir).
+- Trailing aktifken stop her zaman "zirvenin (girişten itibaren kat edilen
+  en yüksek ham fiyat mesafesinin) %60'ı" seviyesinde tutulur — zirve
+  yükseldikçe stop da doğrudan o oranda yükselir, asla geri gitmez.
 - Runway (momentum) devam ettiği sürece TP de stop ile birlikte yükselir;
   tersine dönüş sinyali geldiğinde en yüksek kazançla kapatılır.
 - Short pozisyonlarda aynı mantık ters yönde uygulanır.
@@ -147,32 +148,24 @@ class PositionManager:
         if raw >= self._cfg.trailing_activate_pct:
             if not position.trailing_active:
                 position.trailing_active = True
-                position.last_trail_price = position.entry_price * (
-                    1 + direction * self._cfg.trailing_activate_pct / 100
-                )
                 logger.info("%s: trailing aktif oldu", position.symbol)
 
-            # adım adım stop yükseltme: her %step ham fiyat ilerlemesinde
-            # kazancın yarısını kilitle
-            step_price_size = position.entry_price * (self._cfg.trailing_step_pct / 100)
-            lock_price_size = step_price_size * self._cfg.trailing_lock_ratio
-
-            assert position.last_trail_price is not None
-            guard = 0
-            while guard < 1000:  # sonsuz döngü koruması
-                next_step_price = position.last_trail_price + direction * step_price_size
-                reached = current_price >= next_step_price if position.is_long else current_price <= next_step_price
-                if not reached:
-                    break
-                new_stop = (position.stop_price or position.entry_price) + direction * lock_price_size
+            # Stop her zaman zirvenin (girişten itibaren kat edilen en yüksek
+            # ham fiyat mesafesinin) trailing_lock_ratio kadarında tutulur.
+            # Zirve sadece yükselebildiği için (yukarıdaki takip bloğu) bu stop
+            # da yalnızca yükselir, asla geri gitmez.
+            peak_move = abs(position.peak_favorable_price - position.entry_price)
+            locked_distance = peak_move * self._cfg.trailing_lock_ratio
+            new_stop = position.entry_price + direction * locked_distance
+            if position.stop_price is None or (
+                new_stop > position.stop_price if position.is_long else new_stop < position.stop_price
+            ):
                 position.stop_price = new_stop
-                position.last_trail_price = next_step_price
                 action.update_stop = position.stop_price
-                guard += 1
 
             # TP, runway devam ettikçe zirveyle birlikte uzatılır (yumuşak hedef;
             # gerçek kapanış tetikleyicisi reversal_signal'dır).
-            runway = abs(position.peak_favorable_price - position.entry_price)
+            runway = peak_move
             position.tp_price = position.peak_favorable_price + direction * runway * 0.5
             action.update_tp = position.tp_price
 
