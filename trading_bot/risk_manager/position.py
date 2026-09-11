@@ -27,9 +27,9 @@ class Position:
 
     breakeven_triggered: bool = False
     trailing_active: bool = False
-    last_trail_price: float | None = None   # trailing adımlarının hesaplandığı referans ham fiyat
     # Pozisyonun açıldığından beri ulaştığı en iyi (lehte) fiyat — trailing aktif
-    # olsun olmasın her tick'te güncellenir; "en yüksek PNL" raporlaması için kullanılır.
+    # olsun olmasın her tick'te güncellenir; hem trailing stop hesabı hem
+    # "en yüksek PNL" raporlaması bu alana dayanır.
     peak_favorable_price: float | None = None
 
     opened_at_ms: int = 0
