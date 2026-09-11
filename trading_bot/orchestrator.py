@@ -27,6 +27,7 @@ from .analyzer.price_action import Trend, detect_structure_break, find_swing_poi
 from .config import RiskConfig
 from .data_layer import DataLayer
 from .execution import BinanceFuturesTradingClient, DryRunExecutionEngine, ExecutionEngine
+from .execution.binance_client import BinanceAPIError
 from .liquidation_engine import LiquidationEngine
 from .risk_manager import PositionManager
 from .scanner import Scanner, ScanResult
@@ -192,6 +193,23 @@ class Orchestrator:
             except Exception:
                 logger.exception("%s: başlangıç stop emri gönderilemedi", symbol)
 
+    async def _sync_closed_externally(self, symbol: str, position, last_known_price: float) -> None:
+        """Binance -2022/-4509 gibi bir hatayla 'artık pozisyon yok' derse,
+        bu neredeyse her zaman Binance'teki GERÇEK stop/TP emrinin bizden
+        önce tetiklenip pozisyonu zaten kapattığı anlamına gelir. Bu durumda
+        tekrar tekrar aynı hatayı almak yerine, botun kendi kayıtlarını
+        borsanın gerçek durumuyla senkronize ediyoruz."""
+        logger.warning(
+            "%s: pozisyon borsada zaten kapanmış görünüyor (muhtemelen stop/TP tetiklendi), "
+            "dahili durum senkronize ediliyor",
+            symbol,
+        )
+        try:
+            await self._execution_engine.cancel_open_orders(symbol)
+        except Exception:
+            logger.exception("%s: kalan emirler temizlenirken hata (önemli değil, devam ediliyor)", symbol)
+        self._position_manager.close_position(symbol, last_known_price, reason="borsada_zaten_kapanmis")
+
     async def _close_position(self, symbol: str, reason: str) -> None:
         position = self._position_manager.open_positions.get(symbol)
         if position is None:
@@ -234,6 +252,12 @@ class Orchestrator:
                 logger.warning(sweep.message)
                 try:
                     await self._execution_engine.close_position_market(symbol, position.side, position.quantity)
+                except BinanceAPIError as e:
+                    if e.indicates_no_open_position:
+                        await self._sync_closed_externally(symbol, position, current_price)
+                        continue
+                    logger.exception("%s: sweep sonrası kapatma emri başarısız", symbol)
+                    continue
                 except Exception:
                     logger.exception("%s: sweep sonrası kapatma emri başarısız", symbol)
                     continue
@@ -248,6 +272,12 @@ class Orchestrator:
             if action.close_position:
                 try:
                     await self._execution_engine.close_position_market(symbol, position.side, position.quantity)
+                except BinanceAPIError as e:
+                    if e.indicates_no_open_position:
+                        await self._sync_closed_externally(symbol, position, current_price)
+                        continue
+                    logger.exception("%s: hedef kapatma emri başarısız", symbol)
+                    continue
                 except Exception:
                     logger.exception("%s: hedef kapatma emri başarısız", symbol)
                     continue
@@ -257,11 +287,21 @@ class Orchestrator:
             if action.update_stop is not None:
                 try:
                     await self._execution_engine.update_stop(symbol, position.side, action.update_stop)
+                except BinanceAPIError as e:
+                    if e.indicates_no_open_position:
+                        await self._sync_closed_externally(symbol, position, current_price)
+                        continue
+                    logger.exception("%s: stop güncellenemedi", symbol)
                 except Exception:
                     logger.exception("%s: stop güncellenemedi", symbol)
             if action.update_tp is not None:
                 try:
                     await self._execution_engine.update_take_profit(symbol, position.side, action.update_tp)
+                except BinanceAPIError as e:
+                    if e.indicates_no_open_position:
+                        await self._sync_closed_externally(symbol, position, current_price)
+                        continue
+                    logger.exception("%s: TP güncellenemedi", symbol)
                 except Exception:
                     logger.exception("%s: TP güncellenemedi", symbol)
 
