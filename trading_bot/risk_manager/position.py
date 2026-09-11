@@ -19,6 +19,11 @@ class Position:
     quantity: float
     margin_usdt: float
     leverage: int
+    # Pozisyon açıldığı andaki ATR (Average True Range) değeri — hem Faz A
+    # (başlangıç stop'u) hem Faz B (ATR trailing) boyunca bu değer kullanılır,
+    # pozisyon ömrü boyunca yeniden hesaplanmaz (giriş anındaki volatilite
+    # "birimi" olarak sabit tutulur).
+    atr: float = 0.0
 
     status: PositionStatus = PositionStatus.OPEN
 
