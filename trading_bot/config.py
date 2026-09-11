@@ -55,22 +55,39 @@ WS_PING_TIMEOUT_SECONDS = 10
 @dataclass
 class RiskConfig:
     """Pozisyon yönetimi parametreleri (Risk & Position Manager modülünde kullanılacak,
-    şimdiden burada tutuyoruz çünkü Data Layer'daki bazı buffer boyutları buna bağlı)."""
+    şimdiden burada tutuyoruz çünkü Data Layer'daki bazı buffer boyutları buna bağlı).
+
+    Üç fazlı stop mantığı:
+      Faz A (0% -> trailing_activate_pct): ATR bazlı SABİT başlangıç stop'u
+        (entry_price ± ATR*atr_multiplier). Coin'in kendi volatilitesine göre
+        ayarlanır — dar mumlu (düşük volatilite) bir coin'de dar, geniş mumlu
+        bir coin'de geniş bir stop demektir; sabit bir yüzdeden daha isabetli.
+      Faz B (trailing_activate_pct -> breakeven_trigger_pct): ATR bazlı
+        TRAILING stop — stop, anlık fiyatı ATR*atr_multiplier mesafeden takip
+        eder, sadece lehte yönde güncellenir.
+      Faz C (breakeven_trigger_pct'ten itibaren): stop en az breakeven'a
+        zorlanır, ardından "stop = zirvenin trailing_lock_ratio kadarı"
+        formülüyle kâr kademe kademe kilitlenir (zirve yükseldikçe stop da
+        yükselir, asla geri gitmez).
+    """
     max_concurrent_positions: int = 2
     margin_per_position_usdt: float = 10.0
     max_leverage: int = 5
     margin_mode: str = "ISOLATED"
-    breakeven_trigger_pct: float = 1.0      # ham fiyat hareketi
-    trailing_activate_pct: float = 1.5      # ham fiyat hareketi
-    # Trailing aktifken stop her zaman "zirvenin (girişten itibaren kat edilen
-    # en yüksek ham fiyat mesafesinin) bu oranı" seviyesinde tutulur. Zirve
-    # sadece yükselebildiği için stop da sadece yükselir, asla geri gitmez.
-    # Örn: zirve +%8, trailing_lock_ratio=0.6 -> stop entry'nin +%4.8 üzerinde.
+
+    # --- ATR (Average True Range) ayarları ---
+    atr_period: int = 14
+    atr_timeframe: str = "1h"
+    # Hem Faz A'daki (başlangıç) hem Faz B'deki (trailing) ATR mesafesi için
+    # kullanılır: stop_mesafesi = ATR * atr_multiplier.
+    atr_multiplier: float = 1.5
+
+    trailing_activate_pct: float = 1.5      # Faz A -> Faz B geçişi (ham fiyat hareketi)
+    breakeven_trigger_pct: float = 2.5      # Faz B -> Faz C geçişi: stop breakeven'a zorlanır
+    # Faz C'de stop her zaman "zirvenin (girişten itibaren kat edilen en
+    # yüksek ham fiyat mesafesinin) bu oranı" seviyesinde tutulur.
+    # Örn: zirve +%3, trailing_lock_ratio=0.6 -> o anda kârın %60'ı kilitli.
     trailing_lock_ratio: float = 0.6
-    # Pozisyon açıldığı andan breakeven'a (+%1) ulaşana kadar HİÇ koruma
-    # olmaması riskli — bu yüzden açılışta hemen bu kadar ham fiyat hareketinde
-    # sert (hard) bir başlangıç stop'u konuyor.
-    initial_stop_loss_pct: float = 1.5      # ham fiyat hareketi (ters yönde)
 
 
 @dataclass
