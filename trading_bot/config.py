@@ -56,7 +56,7 @@ WS_PING_TIMEOUT_SECONDS = 10
 class RiskConfig:
     """Pozisyon yönetimi parametreleri (Risk & Position Manager modülünde kullanılacak,
     şimdiden burada tutuyoruz çünkü Data Layer'daki bazı buffer boyutları buna bağlı)."""
-    max_concurrent_positions: int = 3
+    max_concurrent_positions: int = 2
     margin_per_position_usdt: float = 10.0
     max_leverage: int = 5
     margin_mode: str = "ISOLATED"
@@ -70,7 +70,7 @@ class RiskConfig:
     # Pozisyon açıldığı andan breakeven'a (+%1) ulaşana kadar HİÇ koruma
     # olmaması riskli — bu yüzden açılışta hemen bu kadar ham fiyat hareketinde
     # sert (hard) bir başlangıç stop'u konuyor.
-    initial_stop_loss_pct: float = 1.0      # ham fiyat hareketi (ters yönde)
+    initial_stop_loss_pct: float = 1.5      # ham fiyat hareketi (ters yönde)
 
 
 @dataclass
