@@ -23,7 +23,7 @@ import logging
 import time
 
 from .analyzer import MultiTimeframeAnalyzer
-from .analyzer.price_action import Trend, detect_structure_break, find_swing_points
+from .analyzer.price_action import Trend, compute_atr, detect_structure_break, find_swing_points
 from .config import RiskConfig
 from .data_layer import DataLayer
 from .execution import BinanceFuturesTradingClient, DryRunExecutionEngine, ExecutionEngine
@@ -186,12 +186,27 @@ class Orchestrator:
             logger.exception("%s: pozisyon açma emri başarısız", symbol)
             return
 
-        position = self._position_manager.open_position(symbol, signal.side, fill_price, quantity)
+        atr = self._get_atr(symbol)
+        position = self._position_manager.open_position(symbol, signal.side, fill_price, quantity, atr)
         if position.stop_price is not None:
             try:
                 await self._execution_engine.update_stop(symbol, position.side, position.stop_price)
             except Exception:
                 logger.exception("%s: başlangıç stop emri gönderilemedi", symbol)
+
+    def _get_atr(self, symbol: str) -> float:
+        """ATR hesaplar (config'teki zaman dilimi/periyottan); yetersiz veri
+        varsa anlık fiyatın %1'i kadar bir yedek değer kullanır ki bir sembol
+        için ATR çıkmadı diye giriş tamamen engellenmesin."""
+        candles = self._data_layer.get_klines(symbol, self._risk_cfg.atr_timeframe)
+        atr = compute_atr(candles, period=self._risk_cfg.atr_period) if candles else None
+        if atr is not None:
+            return atr
+
+        last_price = candles[-1].close if candles else self._current_price(symbol)
+        fallback = (last_price or 0.0) * 0.01
+        logger.warning("%s: ATR hesaplanamadı (yetersiz veri), yedek değer kullanılıyor: %s", symbol, fallback)
+        return fallback
 
     async def _sync_closed_externally(self, symbol: str, position, last_known_price: float) -> None:
         """Binance -2022/-4509 gibi bir hatayla 'artık pozisyon yok' derse,
@@ -325,7 +340,7 @@ class Orchestrator:
                 except Exception:
                     logger.exception("%s: yeniden giriş emri başarısız", symbol)
                     continue
-                reentered_position = self._position_manager.reenter(symbol, fill_price, quantity)
+                reentered_position = self._position_manager.reenter(symbol, fill_price, quantity, self._get_atr(symbol))
                 if reentered_position.stop_price is not None:
                     try:
                         await self._execution_engine.update_stop(
