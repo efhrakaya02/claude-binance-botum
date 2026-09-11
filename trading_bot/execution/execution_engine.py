@@ -80,11 +80,22 @@ class ExecutionEngine:
         self._tp_order_ids[symbol] = order.get("orderId")
         logger.info("%s: TP güncellendi -> %s", symbol, price)
 
+    async def cancel_open_orders(self, symbol: str) -> None:
+        """Bu sembol için kalan tüm açık emirleri (normal + algo stop/TP)
+        temizler. Pozisyonun borsada dış bir sebeple (örn. stop/TP tetiklenmesi)
+        zaten kapandığı tespit edildiğinde çağrılır — kalan yetim emirleri
+        temizlemek için."""
+        await self._cancel_tracked_orders(symbol)
+
     async def _cancel_tracked_orders(self, symbol: str) -> None:
         try:
             await self._client.cancel_all_open_orders(symbol)
         except Exception:
-            logger.exception("%s: açık emirler iptal edilemedi", symbol)
+            logger.exception("%s: açık (normal) emirler iptal edilemedi", symbol)
+        try:
+            await self._client.cancel_all_algo_open_orders(symbol)
+        except Exception:
+            logger.exception("%s: açık algo (stop/TP) emirleri iptal edilemedi", symbol)
         self._stop_order_ids.pop(symbol, None)
         self._tp_order_ids.pop(symbol, None)
 
