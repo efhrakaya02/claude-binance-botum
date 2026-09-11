@@ -28,6 +28,20 @@ class BinanceAPIError(Exception):
         self.payload = payload
         super().__init__(f"Binance API hatası ({status}): {payload}")
 
+    @property
+    def code(self) -> int | None:
+        return self.payload.get("code")
+
+    @property
+    def indicates_no_open_position(self) -> bool:
+        """True ise: bu hata, borsada artık kapatılacak/güncellenecek bir
+        pozisyon KALMADIĞI için oluşmuştur — genelde bizim stop/TP emrimizden
+        BAĞIMSIZ olarak (örn. Binance'teki gerçek stop/TP emri bizden önce
+        tetiklenip pozisyonu zaten kapatmış) ortaya çıkar. Botun kendi
+        kayıtlarının borsanın gerçek durumuyla senkronize edilmesi gerektiğinin
+        işaretidir — tekrar tekrar denenmesi gereken geçici bir hata DEĞİLDİR."""
+        return self.code in (-2022, -4509)
+
 
 class BinanceFuturesTradingClient:
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False) -> None:
