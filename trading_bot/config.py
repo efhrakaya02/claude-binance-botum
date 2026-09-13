@@ -71,7 +71,8 @@ class RiskConfig:
         yükselir, asla geri gitmez).
     """
     max_concurrent_positions: int = 2
-    margin_per_position_usdt: float = 4.0
+    # ~5 USDT sermayeyle 2 pozisyonun aynı anda sığması için 2 USDT (önceki: 4).
+    margin_per_position_usdt: float = 2.0
     max_leverage: int = 5
     margin_mode: str = "ISOLATED"
 
@@ -80,7 +81,11 @@ class RiskConfig:
     atr_timeframe: str = "1h"
     # Hem Faz A'daki (başlangıç) hem Faz B'deki (trailing) ATR mesafesi için
     # kullanılır: stop_mesafesi = ATR * atr_multiplier.
-    atr_multiplier: float = 1.5
+    # 1.5'ten 2.5'e yükseltildi: LSKUSDT raporunda görülen "gerçek bir trendin
+    # ortasındaki sıradan geri çekilmelerde bile stop'a takılıp hemen tekrar
+    # girme" paterni, büyük trendleri sonuna kadar taşıyabilmek için erken
+    # fazların gürültüye karşı daha toleranslı olmasını gerektiriyor.
+    atr_multiplier: float = 2.5
 
     trailing_activate_pct: float = 1.5      # Faz A -> Faz B geçişi (ham fiyat hareketi)
     breakeven_trigger_pct: float = 2.5      # Faz B -> Faz C geçişi: stop breakeven'a zorlanır
