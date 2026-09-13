@@ -21,9 +21,11 @@ Uygulanan kurallar (üç fazlı ATR bazlı stop mantığı):
 
 NOT: "Zirve tespiti" burada, dışarıdan (Analyzer'dan) gelen bir
 `reversal_signal: bool` parametresiyle temsil ediliyor — gerçek zirve
-tahmini asla kesin olmaz, bu yüzden 1m/5m'de pozisyon yönünün TERSİNE bir
-CHoCH (character break) veya momentum kaybı Analyzer tarafından tespit
-edildiğinde bu bayrak True gönderilir.
+tahmini asla kesin olmaz, bu yüzden 15m'de pozisyon yönünün TERSİNE bir
+CHoCH (character break) Analyzer tarafından tespit edildiğinde bu bayrak
+True gönderilir. Bu sinyal sadece Faz C'ye (breakeven_triggered) ulaşılmış
+pozisyonlarda dinlenir — büyük bir trendin içindeki normal dalgalanmalar
+erken fazda yanlışlıkla "dönüş" sayılıp pozisyonu erken kapatmasın diye.
 """
 
 from __future__ import annotations
@@ -191,7 +193,12 @@ class PositionManager:
             action.update_tp = position.tp_price
 
         # --- Zirve / tersine dönüş: en yüksek kazançla kapat -----------------
-        if position.trailing_active and reversal_signal:
+        # Sadece breakeven_triggered (Faz C, gerçek kâr kilitleme aşaması)
+        # sonrasında dinleniyor — Faz B'de (henüz trend teyit olmamışken)
+        # bir 15m CHoCH bile büyük bir trendin normal bir dalgalanması
+        # olabilir; erken kapanmak yerine ATR bazlı stop'un kendi işini
+        # yapmasına izin veriyoruz.
+        if position.breakeven_triggered and reversal_signal:
             action.close_position = True
             action.close_reason = "reversal_signal (zirve tespit edildi)"
 
