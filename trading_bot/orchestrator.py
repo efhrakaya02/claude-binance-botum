@@ -51,6 +51,12 @@ SYMBOL_WATCH_TTL_SECONDS = 1800.0  # 30 dakika (~6 tarama döngüsü)
 # yaklaşmasın diye sert bir tavan (60 sembol * 6 stream = 360 stream).
 MAX_WATCHED_SYMBOLS = 60
 
+# Bir sembol hard stop'a (Faz A/B/C stop seviyesi) takılarak ZARARLA
+# kapanırsa, aynı zayıf kurulumu hemen tekrar denememesi için bu süre
+# boyunca aday olarak değerlendirilmez. Sweep sonrası çıkışları KAPSAMAZ —
+# o zaten kendi (hızlı) izleme/yeniden-giriş mekanizmasına sahip.
+STOP_LOSS_COOLDOWN_SECONDS = 1200.0  # 20 dakika
+
 
 class Orchestrator:
     def __init__(
@@ -72,6 +78,8 @@ class Orchestrator:
         self._stop_event = asyncio.Event()
         # symbol -> en son ne zaman scanner adayı olarak seçildiği (budama için)
         self._symbol_last_candidate_ts: dict[str, float] = {}
+        # symbol -> bu zamana kadar (time.time()) soğumada, aday olarak değerlendirilmez
+        self._symbol_cooldown_until: dict[str, float] = {}
 
     async def start(self) -> None:
         await self._data_layer.start()
@@ -113,6 +121,12 @@ class Orchestrator:
         for c in candidates:
             self._symbol_last_candidate_ts[c.symbol] = now
 
+            if self._is_in_cooldown(c.symbol, now):
+                logger.info(
+                    "%s: soğuma süresinde (son stop-loss sonrası), bu tarama döngüsünde atlanıyor", c.symbol
+                )
+                continue
+
             if c.symbol in self._data_layer.watched_symbols:
                 await self._try_enter(c.symbol)
                 continue
@@ -129,6 +143,18 @@ class Orchestrator:
             # anında hazır olur, ama WS'in ilk mesajları için) kısa bir
             # ısınma payı bırakıyoruz.
             asyncio.create_task(self._try_enter_after_warmup(c.symbol))
+
+    def _is_in_cooldown(self, symbol: str, now: float | None = None) -> bool:
+        until = self._symbol_cooldown_until.get(symbol)
+        if until is None:
+            return False
+        return (now if now is not None else time.time()) < until
+
+    def _start_cooldown(self, symbol: str) -> None:
+        self._symbol_cooldown_until[symbol] = time.time() + STOP_LOSS_COOLDOWN_SECONDS
+        logger.info(
+            "%s: stop-loss sonrası %d dakika soğumaya alındı", symbol, int(STOP_LOSS_COOLDOWN_SECONDS // 60)
+        )
 
     async def _prune_stale_symbols(self) -> None:
         """Pozisyonu/izlenen fırsatı olmayan ve uzun süredir aday olarak
@@ -223,7 +249,9 @@ class Orchestrator:
             await self._execution_engine.cancel_open_orders(symbol)
         except Exception:
             logger.exception("%s: kalan emirler temizlenirken hata (önemli değil, devam ediliyor)", symbol)
-        self._position_manager.close_position(symbol, last_known_price, reason="borsada_zaten_kapanmis")
+        closed = self._position_manager.close_position(symbol, last_known_price, reason="borsada_zaten_kapanmis")
+        if closed is not None and closed.realized_pnl_usdt is not None and closed.realized_pnl_usdt < 0:
+            self._start_cooldown(symbol)
 
     async def _close_position(self, symbol: str, reason: str) -> None:
         position = self._position_manager.open_positions.get(symbol)
@@ -297,6 +325,8 @@ class Orchestrator:
                     logger.exception("%s: hedef kapatma emri başarısız", symbol)
                     continue
                 self._position_manager.close_position(symbol, current_price, action.close_reason or "target")
+                if (action.close_reason or "").startswith("stop_price_reached"):
+                    self._start_cooldown(symbol)
                 continue
 
             if action.update_stop is not None:
