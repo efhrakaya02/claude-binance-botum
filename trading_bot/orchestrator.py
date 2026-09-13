@@ -432,10 +432,17 @@ class Orchestrator:
         return candles[-1].close if candles else None
 
     def _detect_reversal(self, symbol: str, position_side: str) -> bool:
-        """1m ve 5m'de pozisyonun TERSİ yönde CHoCH var mı — zirve/tükeniş sezgisi."""
+        """15m'de pozisyonun TERSİ yönde CHoCH var mı — zirve/tükeniş sezgisi.
+
+        Önceden 1m/5m kontrol ediliyordu — ama gerçek bir trendin İÇİNDEKİ
+        sıradan geri çekilme mumları bile 1m/5m'de kolayca "CHoCH" gibi
+        görünür (LSKUSDT raporunda görülen erken kapanma paterninin ana
+        nedenlerinden biri buydu). 15m'ye çıkarmak, sadece gerçekten anlamlı
+        bir yapı kırılımında kapanmayı tetikler; büyük bir trend içindeki
+        normal dalgalanmalarda pozisyon açık kalmaya devam eder."""
         opposite_trend = Trend.DOWN if position_side == "LONG" else Trend.UP
         prevailing = Trend.UP if position_side == "LONG" else Trend.DOWN
-        for interval in ("1m", "5m"):
+        for interval in ("15m",):
             candles = self._data_layer.get_klines(symbol, interval)
             if not candles:
                 continue
