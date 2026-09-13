@@ -71,7 +71,7 @@ class RiskConfig:
         yükselir, asla geri gitmez).
     """
     max_concurrent_positions: int = 2
-    margin_per_position_usdt: float = 10.0
+    margin_per_position_usdt: float = 4.0
     max_leverage: int = 5
     margin_mode: str = "ISOLATED"
 
@@ -106,7 +106,7 @@ class AnalyzerConfig:
     entry_weight: float = 35.0     # 1h uyum + BOS bileşeninin toplam ağırlığı
     timing_weight: float = 35.0    # 15m/5m/1m hacim+momentum bileşeninin toplam ağırlığı
     timing_target_volume_ratio: float = 1.5  # bu orana ULAŞMASA bile kısmi puan verilir
-    actionable_confidence_threshold: float = 60.0  # işlem açmak için gereken minimum toplam skor
+    actionable_confidence_threshold: float = 65.0  # işlem açmak için gereken minimum toplam skor
 
 
 @dataclass
