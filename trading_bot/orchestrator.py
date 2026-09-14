@@ -185,15 +185,10 @@ class Orchestrator:
         if signal is None or not signal.is_actionable:
             return
 
-        if not self._position_manager.has_free_slot():
-            # Slot doluysa: daha büyük fırsat mı, yoksa vazgeç mi kararı basitçe
-            # confidence karşılaştırmasıyla veriliyor — gerçek kullanımda bu eşik
-            # test edilerek ayarlanmalı.
-            riskiest = self._position_manager.find_riskiest_position()
-            if riskiest is None or signal.confidence < 70:
-                return
-            await self._close_position(riskiest.symbol, reason="daha_büyük_fırsat_için_slot_boşaltıldı")
-
+        # KRİTİK SIRALAMA: entry_price ve güvenlik kontrolü, slot boşaltmak
+        # için mevcut bir pozisyonu kapatmadan ÖNCE yapılmalı — aksi halde
+        # "daha büyük fırsat" için iyi bir pozisyon kapatılıp sonra güvenlik
+        # kontrolünde reddedilirse, kapatma tamamen boşa gitmiş olur.
         entry_price = signal.suggested_entry_price
         if entry_price is None:
             return
@@ -202,6 +197,15 @@ class Orchestrator:
         if not safety.is_safe:
             logger.info("%s: giriş güvensiz, atlanıyor -> %s", symbol, safety.reasons)
             return
+
+        if not self._position_manager.has_free_slot():
+            # Slot doluysa: daha büyük fırsat mı, yoksa vazgeç mi kararı basitçe
+            # confidence karşılaştırmasıyla veriliyor — gerçek kullanımda bu eşik
+            # test edilerek ayarlanmalı.
+            riskiest = self._position_manager.find_riskiest_position()
+            if riskiest is None or signal.confidence < 70:
+                return
+            await self._close_position(riskiest.symbol, reason="daha_büyük_fırsat_için_slot_boşaltıldı")
 
         assert self._execution_engine is not None
         try:
