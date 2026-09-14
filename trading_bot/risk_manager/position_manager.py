@@ -12,9 +12,11 @@ Uygulanan kurallar (üç fazlı ATR bazlı stop mantığı):
 - Faz B (%1.5 -> breakeven_trigger_pct=%2.5): ATR bazlı TRAILING stop — anlık
   fiyatı ATR*atr_multiplier mesafeden takip eder, sadece lehte günceller.
 - Faz C (%2.5'ten itibaren): stop en az breakeven'a zorlanır, ardından
-  "stop = zirvenin trailing_lock_ratio (%60) kadarı" formülüyle kâr kademe
-  kademe kilitlenir — zirve yükseldikçe stop da yükselir, asla geri gitmez.
-  (Örn: zirve tam %3'e ulaştığında stop = entry + %3*0.6 = kârın %60'ı kilitli.)
+  "stop = zirvenin trailing_lock_ratio (%35) kadarı" formülüyle GENİŞ bir
+  felaket güvenlik ağına dönüşür — asıl "momentum bitti mi" kararını
+  reversal_signal (15m CHoCH) verir, bu stop sadece çok büyük bir geri
+  çekilmede devreye girer (momentum devam ettiği sürece pozisyon açık kalır).
+  (Örn: zirve %10'a ulaştığında stop = entry + %10*0.35 = kârın %35'i kilitli.)
 - Runway (momentum) devam ettiği sürece TP de zirveyle birlikte yükselir;
   tersine dönüş sinyali geldiğinde en yüksek kazançla market'ten kapatılır.
 - Short pozisyonlarda aynı mantık ters yönde uygulanır.
