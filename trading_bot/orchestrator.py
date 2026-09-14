@@ -57,6 +57,15 @@ MAX_WATCHED_SYMBOLS = 60
 # o zaten kendi (hızlı) izleme/yeniden-giriş mekanizmasına sahip.
 STOP_LOSS_COOLDOWN_SECONDS = 1200.0  # 20 dakika
 
+# "Daha büyük fırsat için slot boşaltma" (preemption) güvenlik sınırları.
+# 2026-09-14'te CAPUSDT->AVAAIUSDT->FLOCKUSDT'nin saniyeler içinde art arda
+# açılıp kapatıldığı bir olay yaşandı — yeni açılan pozisyonlar hiç şans
+# bulamadan "daha büyük fırsat" diye feda ediliyordu. Bu iki sabit bunu önler:
+MIN_HOLD_BEFORE_PREEMPT_SECONDS = 300.0  # yeni bir pozisyon en az 5dk dokunulmaz
+# actionable_confidence_threshold'un (şu an 72) KESİNLİKLE üzerinde olmalı —
+# aksi halde her actionable sinyal bu kontrolü otomatik geçer.
+PREEMPT_MIN_CONFIDENCE = 88.0
+
 
 class Orchestrator:
     def __init__(
@@ -199,12 +208,32 @@ class Orchestrator:
             return
 
         if not self._position_manager.has_free_slot():
-            # Slot doluysa: daha büyük fırsat mı, yoksa vazgeç mi kararı basitçe
-            # confidence karşılaştırmasıyla veriliyor — gerçek kullanımda bu eşik
-            # test edilerek ayarlanmalı.
             riskiest = self._position_manager.find_riskiest_position()
-            if riskiest is None or signal.confidence < 70:
+            if riskiest is None:
                 return
+
+            # 1) Asgari bekleme süresi: yeni açılmış bir pozisyon saniyeler
+            #    içinde "daha büyük fırsat" diye feda edilmesin — en azından
+            #    Faz B/C'ye ulaşıp ulaşmayacağını görmek için zaman tanınmalı.
+            age_seconds = (time.time() * 1000 - riskiest.opened_at_ms) / 1000
+            if age_seconds < MIN_HOLD_BEFORE_PREEMPT_SECONDS:
+                return
+
+            # 2) Zaten momentum göstermiş (trailing aktif) bir pozisyon feda
+            #    edilmesin — "momentum devam ettiği sürece taşı" felsefesiyle
+            #    doğrudan çelişir; kazanan bir işlemi yeni/kanıtlanmamış bir
+            #    sinyal için bırakmıyoruz.
+            if riskiest.trailing_active:
+                return
+
+            # 3) Eşik, actionable_confidence_threshold'un ZORUNLU olarak
+            #    üzerinde olmalı — aksi halde her actionable sinyal (zaten en
+            #    az actionable_confidence_threshold'a sahip) bu kontrolü
+            #    otomatik geçer ve preemption anlamsızlaşır. Sadece gerçekten
+            #    istisnai (çok güçlü) bir sinyal mevcut pozisyonu feda ettirsin.
+            if signal.confidence < PREEMPT_MIN_CONFIDENCE:
+                return
+
             await self._close_position(riskiest.symbol, reason="daha_büyük_fırsat_için_slot_boşaltıldı")
 
         assert self._execution_engine is not None
