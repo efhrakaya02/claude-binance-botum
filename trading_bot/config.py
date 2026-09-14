@@ -95,8 +95,16 @@ class RiskConfig:
     breakeven_trigger_pct: float = 2.5      # Faz B -> Faz C geçişi: stop breakeven'a zorlanır
     # Faz C'de stop her zaman "zirvenin (girişten itibaren kat edilen en
     # yüksek ham fiyat mesafesinin) bu oranı" seviyesinde tutulur.
-    # Örn: zirve +%3, trailing_lock_ratio=0.6 -> o anda kârın %60'ı kilitli.
-    trailing_lock_ratio: float = 0.6
+    #
+    # ÖNEMLİ FELSEFE: Bu stop artık "asıl çıkış tetikleyicisi" DEĞİL, geniş bir
+    # FELAKET GÜVENLİK AĞI — "momentum devam ettiği sürece pozisyonu açık tut"
+    # kararını asıl veren şey reversal_signal (15m CHoCH, gerçek zamanlı
+    # momentum kontrolü). 0.6 iken (zirvenin %60'ı) bu stop çok sık, sıradan
+    # bir geri çekilmede bile reversal_signal'dan ÖNCE tetikleniyordu (örn.
+    # CAPUSDT: momentum hâlâ sürerken salt bu oran yüzünden kapandı). 0.35'e
+    # düşürüldü — artık sadece gerçekten büyük bir geri çekilmede devreye
+    # giriyor, normal şartlarda kararı 15m CHoCH veriyor.
+    trailing_lock_ratio: float = 0.35
 
 
 @dataclass
