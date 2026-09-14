@@ -70,9 +70,13 @@ class RiskConfig:
         formülüyle kâr kademe kademe kilitlenir (zirve yükseldikçe stop da
         yükselir, asla geri gitmez).
     """
-    max_concurrent_positions: int = 2
-    # ~5 USDT sermayeyle 2 pozisyonun aynı anda sığması için 2 USDT (önceki: 4).
-    margin_per_position_usdt: float = 2.0
+    # Sermaye küçükken (şu an ~3.82 USDT) 2 pozisyonu aynı anda ince ince
+    # bölmek yerine TEK, en kaliteli fırsata odaklanmak hem komisyon yükünü
+    # yarıya indiriyor hem de sermayeyi daha güçlü kullanıyor.
+    max_concurrent_positions: int = 1
+    # 3 USDT marj (5x ile 15 USDT'lik pozisyon), 3.82 USDT bakiyede ~0.8 USDT
+    # komisyon/dalgalanma payı bırakıyor.
+    margin_per_position_usdt: float = 3.0
     max_leverage: int = 5
     margin_mode: str = "ISOLATED"
 
@@ -110,8 +114,11 @@ class AnalyzerConfig:
     macro_weight: float = 30.0     # 4h yönü net mi (bu hâlâ katı bir kapı — RANGE ise sinyal yok)
     entry_weight: float = 35.0     # 1h uyum + BOS bileşeninin toplam ağırlığı
     timing_weight: float = 35.0    # 15m/5m/1m hacim+momentum bileşeninin toplam ağırlığı
-    timing_target_volume_ratio: float = 1.5  # bu orana ULAŞMASA bile kısmi puan verilir
-    actionable_confidence_threshold: float = 65.0  # işlem açmak için gereken minimum toplam skor
+    timing_target_volume_ratio: float = 1.8  # bu orana ULAŞMASA bile kısmi puan verilir (önceki: 1.5)
+    # Sermaye çok küçükken (şu an ~3.82 USDT) her işlem komisyon açısından
+    # nispeten pahalı — az ama isabetli işlem stratejisi için 65'ten 72'ye
+    # yükseltildi.
+    actionable_confidence_threshold: float = 72.0
 
 
 @dataclass
