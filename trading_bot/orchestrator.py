@@ -328,8 +328,13 @@ class Orchestrator:
                 except Exception:
                     logger.exception("%s: hedef kapatma emri başarısız", symbol)
                     continue
-                self._position_manager.close_position(symbol, current_price, action.close_reason or "target")
-                if (action.close_reason or "").startswith("stop_price_reached"):
+                closed = self._position_manager.close_position(symbol, current_price, action.close_reason or "target")
+                # Cooldown SADECE gerçek zararda uygulanmalı — "stop_price_reached"
+                # hem gerçek erken zararlarda (Faz A/B) hem de Faz C'nin kâr
+                # kilitleyen trailing stop'unda (zirveden geri çekilince kârla
+                # çıkış) aynı metinle oluşuyor. Metne değil, gerçekleşen PNL'in
+                # işaretine bakmak gerekiyor.
+                if closed is not None and closed.realized_pnl_usdt is not None and closed.realized_pnl_usdt < 0:
                     self._start_cooldown(symbol)
                 continue
 
