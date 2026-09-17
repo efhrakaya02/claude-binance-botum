@@ -385,7 +385,7 @@ class Orchestrator:
                 continue
 
             # 2) Ters yönde yapı kırılımı (zirve/tersine dönüş sinyali)
-            reversal_signal = self._detect_reversal(symbol, position.side)
+            reversal_signal = self._detect_reversal(symbol, position.side, position.trend_mode)
 
             action = self._position_manager.update_position_risk(position, current_price, reversal_signal)
 
@@ -496,11 +496,12 @@ class Orchestrator:
 
             tp_str = f"{position.tp_price:.6g}" if position.tp_price is not None else "—"
             stop_str = f"{position.stop_price:.6g}" if position.stop_price is not None else "—"
+            trend_mode_str = " [TREND MODE]" if position.trend_mode else ""
 
             lines.append(
                 f"  {symbol} {position.side} | giriş={position.entry_price:.6g} "
                 f"anlık={current_price:.6g} | TP={tp_str} SL={stop_str} | "
-                f"PNL(ham fiyat)=%{pnl_pct:+.2f} en_yüksek=%{peak_pnl_pct:+.2f}"
+                f"PNL(ham fiyat)=%{pnl_pct:+.2f} en_yüksek=%{peak_pnl_pct:+.2f}{trend_mode_str}"
             )
 
         logger.info("İşlem takibi (%d açık pozisyon):\n%s", len(positions), "\n".join(lines))
@@ -513,26 +514,26 @@ class Orchestrator:
         candles = self._data_layer.get_klines(symbol, "1m", limit=1)
         return candles[-1].close if candles else None
 
-    def _detect_reversal(self, symbol: str, position_side: str) -> bool:
-        """15m'de pozisyonun TERSİ yönde CHoCH var mı — zirve/tükeniş sezgisi.
+    def _detect_reversal(self, symbol: str, position_side: str, trend_mode: bool = False) -> bool:
+        """Pozisyonun TERSİ yönde CHoCH var mı — zirve/tükeniş sezgisi.
 
-        Önceden 1m/5m kontrol ediliyordu — ama gerçek bir trendin İÇİNDEKİ
-        sıradan geri çekilme mumları bile 1m/5m'de kolayca "CHoCH" gibi
-        görünür (LSKUSDT raporunda görülen erken kapanma paterninin ana
-        nedenlerinden biri buydu). 15m'ye çıkarmak, sadece gerçekten anlamlı
-        bir yapı kırılımında kapanmayı tetikler; büyük bir trend içindeki
-        normal dalgalanmalarda pozisyon açık kalmaya devam eder."""
+        Normal modda 15m kontrol edilir (1m/5m'deki sıradan geri çekilme
+        mumları bile "CHoCH" gibi görünüp erken kapanmaya yol açıyordu).
+
+        Trend Mode'da (zirve trend_mode_peak_pct'i geçmiş, güçlü/kanıtlanmış
+        bir mega-trend) bir adım daha yukarı çıkıp 1h'ye bakılır — amaç,
+        gerçek büyük hareketleri (%50-100+) 15m'deki normal dalgalanmalarla
+        bile erken kapatmadan, mümkün olduğunca dönemsel zirveye (ATH'a)
+        kadar taşımak."""
         opposite_trend = Trend.DOWN if position_side == "LONG" else Trend.UP
         prevailing = Trend.UP if position_side == "LONG" else Trend.DOWN
-        for interval in ("15m",):
-            candles = self._data_layer.get_klines(symbol, interval)
-            if not candles:
-                continue
-            swings = find_swing_points(candles, lookback=2)
-            brk = detect_structure_break(candles, swings, prevailing)
-            if brk is not None and brk.kind == "CHoCH" and brk.direction == opposite_trend:
-                return True
-        return False
+        interval = "1h" if trend_mode else "15m"
+        candles = self._data_layer.get_klines(symbol, interval)
+        if not candles:
+            return False
+        swings = find_swing_points(candles, lookback=2)
+        brk = detect_structure_break(candles, swings, prevailing)
+        return brk is not None and brk.kind == "CHoCH" and brk.direction == opposite_trend
 
     def _detect_resumption(self, symbol: str, side: str) -> bool:
         """Düzeltme sonrası hareketin kaldığı yerden (orijinal yönde) devam
