@@ -109,6 +109,13 @@ class RiskConfig:
     # düşürüldü — artık sadece gerçekten büyük bir geri çekilmede devreye
     # giriyor, normal şartlarda kararı 15m CHoCH veriyor.
     trailing_lock_ratio: float = 0.35
+    # "Trend Mode" (Faz D): zirve bu ham fiyat hareketine ulaşırsa (güçlü,
+    # kanıtlanmış bir mega-trend demektir) dönüş tespiti 15m yerine 1h CHoCH'a
+    # geçer — amaç, gerçek büyük hareketleri (%50-100+) sıradan 15m gürültüsü
+    # yüzünden erken kapatmadan, mümkün olduğunca dönemsel zirveye kadar
+    # taşımak. 8.0 seçildi çünkü bu seviyeye ulaşan bir hareket artık şansa
+    # değil gerçek bir trende işaret eder.
+    trend_mode_peak_pct: float = 8.0
 
 
 @dataclass
