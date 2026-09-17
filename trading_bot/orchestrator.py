@@ -66,6 +66,12 @@ MIN_HOLD_BEFORE_PREEMPT_SECONDS = 300.0  # yeni bir pozisyon en az 5dk dokunulma
 # aksi halde her actionable sinyal bu kontrolü otomatik geçer.
 PREEMPT_MIN_CONFIDENCE = 88.0
 
+# Bir pozisyon bu kadar süre içinde Faz B'ye (trailing_activate_pct, momentum
+# kanıtlanması) hiç ulaşamazsa "bu sinyal işe yaramadı" kabul edilip kapatılır.
+# max_concurrent_positions=1 iken, durgun bir işlem tek slot'u süresiz
+# kilitleyip daha iyi fırsatları kaçırtmasın diye.
+MAX_STAGNANT_HOLD_SECONDS = 1800.0  # 30 dakika
+
 
 class Orchestrator:
     def __init__(
@@ -338,6 +344,33 @@ class Orchestrator:
                     logger.exception("%s: sweep sonrası kapatma emri başarısız", symbol)
                     continue
                 self._position_manager.handle_sweep_exit(position, current_price)
+                continue
+
+            # 1b) Durgunluk zaman aşımı — Faz B'ye (momentum kanıtlanması)
+            #     hiç ulaşamamış bir pozisyon süresiz açık kalmasın. Özellikle
+            #     max_concurrent_positions=1 iken, momentum hiç gelmeyen bir
+            #     işlem tek slot'u süresiz kilitleyip daha iyi fırsatları
+            #     kaçırtır.
+            age_seconds = (time.time() * 1000 - position.opened_at_ms) / 1000
+            if not position.trailing_active and age_seconds > MAX_STAGNANT_HOLD_SECONDS:
+                logger.info(
+                    "%s: %d dakikadır momentum kazanılamadı (hâlâ Faz A/B), durgunluk zaman aşımıyla kapatılıyor",
+                    symbol, int(age_seconds // 60),
+                )
+                try:
+                    await self._execution_engine.close_position_market(symbol, position.side, position.quantity)
+                except BinanceAPIError as e:
+                    if e.indicates_no_open_position:
+                        await self._sync_closed_externally(symbol, position, current_price)
+                        continue
+                    logger.exception("%s: durgunluk zaman aşımı kapatması başarısız", symbol)
+                    continue
+                except Exception:
+                    logger.exception("%s: durgunluk zaman aşımı kapatması başarısız", symbol)
+                    continue
+                closed = self._position_manager.close_position(symbol, current_price, "stagnant_timeout")
+                if closed is not None and closed.realized_pnl_usdt is not None and closed.realized_pnl_usdt < 0:
+                    self._start_cooldown(symbol)
                 continue
 
             # 2) Ters yönde yapı kırılımı (zirve/tersine dönüş sinyali)
