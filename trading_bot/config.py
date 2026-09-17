@@ -50,6 +50,10 @@ OI_FUNDING_POLL_INTERVAL_SECONDS = 60
 WS_RECONNECT_MIN_BACKOFF_SECONDS = 1
 WS_RECONNECT_MAX_BACKOFF_SECONDS = 30
 WS_PING_TIMEOUT_SECONDS = 10
+# Binance, bir WS bağlantısı üzerinden saniyede ~5 SUBSCRIBE/UNSUBSCRIBE
+# yönetim mesajına izin veriyor; aşılırsa 1008 (policy violation) ile
+# bağlantıyı kapatıyor. 4 (5'in altında) kullanarak güvenli mesafe bırakıyoruz.
+WS_SUBSCRIBE_RATE_LIMIT_PER_SECOND = 4
 
 
 @dataclass
