@@ -48,8 +48,11 @@ POSITION_STATUS_LOG_INTERVAL_SECONDS = 120.0
 # bağlanma döngüsüne sokar — bu yüzden budama zorunlu.
 SYMBOL_WATCH_TTL_SECONDS = 1800.0  # 30 dakika (~6 tarama döngüsü)
 # Ek güvenlik: budama gecikse bile stream sayısı asla 1024 limitine
-# yaklaşmasın diye sert bir tavan (60 sembol * 6 stream = 360 stream).
-MAX_WATCHED_SYMBOLS = 60
+# yaklaşmasın diye sert bir tavan (100 sembol * 6 stream = 600 stream,
+# Binance'in 1024 sınırının hâlâ belirgin altında). 60'tan yükseltildi —
+# aynı ~60 sembolün sürekli aday olarak kalıp yeni adaylara hiç yer
+# bırakmadığı gözlemlendi (0 açık pozisyonken bile kapasite sürekli doluydu).
+MAX_WATCHED_SYMBOLS = 100
 
 # Bir sembol hard stop'a (Faz A/B/C stop seviyesi) takılarak ZARARLA
 # kapanırsa, aynı zayıf kurulumu hemen tekrar denememesi için bu süre
@@ -197,7 +200,15 @@ class Orchestrator:
             return  # zaten açık
 
         signal = self._analyzer.analyze(symbol)
-        if signal is None or not signal.is_actionable:
+        if signal is None:
+            logger.info("%s: analiz için henüz yeterli veri yok, atlanıyor", symbol)
+            return
+        if not signal.is_actionable:
+            logger.info(
+                "%s: sinyal yetersiz (confidence=%.1f, eşik=%.1f) -> %s",
+                symbol, signal.confidence, self._analyzer.cfg.actionable_confidence_threshold,
+                "; ".join(signal.reasons) if signal.reasons else "gerekçe yok",
+            )
             return
 
         # KRİTİK SIRALAMA: entry_price ve güvenlik kontrolü, slot boşaltmak
