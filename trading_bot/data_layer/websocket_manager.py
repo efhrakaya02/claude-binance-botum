@@ -19,6 +19,7 @@ import asyncio
 import itertools
 import json
 import logging
+import time
 from typing import Awaitable, Callable
 
 import websockets
@@ -53,6 +54,11 @@ class BinanceFuturesWebSocket:
         self._id_counter = itertools.count(1)
         self._stop_event = asyncio.Event()
         self._connected_event = asyncio.Event()
+        # Binance, tek bağlantı üzerinden saniyede ~5 SUBSCRIBE/UNSUBSCRIBE
+        # yönetim mesajına izin veriyor; aşılırsa 1008 (policy violation) ile
+        # bağlantıyı kapatıyor. Bunu aşmamak için gönderim zamanlarını
+        # (sliding window) takip edip gerekirse bekliyoruz.
+        self._recent_subscribe_sends: list[float] = []
 
     # ------------------------------------------------------------------ #
     # Genel yaşam döngüsü
@@ -159,9 +165,26 @@ class BinanceFuturesWebSocket:
             await self._send_subscribe_message(existing, method="UNSUBSCRIBE")
 
     async def _send_subscribe_message(self, streams: list[str], method: str) -> None:
+        await self._rate_limit_subscribe()
         payload = {"method": method, "params": streams, "id": next(self._id_counter)}
         assert self._ws is not None
         await self._ws.send(json.dumps(payload))
+
+    async def _rate_limit_subscribe(self) -> None:
+        """Binance'in saniyede ~5 SUBSCRIBE/UNSUBSCRIBE limitini aşmamak için
+        gönderim zamanlarını kayan bir pencerede takip edip, dolmuşsa bekler.
+        Aşılırsa Binance bağlantıyı 1008 (policy violation) ile kapatıyor —
+        özellikle bir tarama döngüsünde birden fazla yeni sembol art arda
+        eklendiğinde (her biri ayrı bir SUBSCRIBE mesajı) bu sınıra çok kolay
+        çarpılıyor."""
+        now = time.monotonic()
+        window_seconds = 1.0
+        self._recent_subscribe_sends = [t for t in self._recent_subscribe_sends if now - t < window_seconds]
+        if len(self._recent_subscribe_sends) >= config.WS_SUBSCRIBE_RATE_LIMIT_PER_SECOND:
+            sleep_for = window_seconds - (now - self._recent_subscribe_sends[0])
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+        self._recent_subscribe_sends.append(time.monotonic())
 
     # ------------------------------------------------------------------ #
     # Mesaj işleme
