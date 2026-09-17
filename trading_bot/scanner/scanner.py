@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 from ..config import ScannerConfig
@@ -56,6 +57,15 @@ class Scanner:
         self._state = ScannerState()
         self._stop_event = asyncio.Event()
         self.last_scanned_count = 0  # bir önceki taramada işlenen toplam USDT-M sembol sayısı
+        # TradFi-Perps (TSLAUSDT, XAUUSDT, NVDAUSDT vb. — hisse/emtia
+        # perpetual'ları, contractType="TRADIFI_PERPETUAL") stratejimiz için
+        # kalibre edilmemiş: farklı likidasyon/funding dinamikleri var ve
+        # işlem açmak için ayrı bir sözleşme imzası gerektiriyor (Binance
+        # hata -4411 ile reddediyor). Bunları taramadan tamamen çıkarıyoruz.
+        # Liste nadiren değiştiği için saatte bir yenileniyor.
+        self._valid_symbols_cache: set[str] | None = None
+        self._valid_symbols_cache_ts: float = 0.0
+        self._valid_symbols_cache_ttl_seconds: float = 3600.0
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -86,12 +96,31 @@ class Scanner:
             except asyncio.TimeoutError:
                 pass
 
+    async def _get_valid_symbols(self) -> set[str]:
+        """Sadece gerçek kripto PERPETUAL sembolleri (TradFi-Perps hariç)."""
+        now = time.time()
+        if self._valid_symbols_cache is None or (now - self._valid_symbols_cache_ts) > self._valid_symbols_cache_ttl_seconds:
+            try:
+                symbols = await self._data_layer.get_all_futures_symbols()
+                self._valid_symbols_cache = set(symbols)
+                self._valid_symbols_cache_ts = now
+            except Exception:
+                logger.exception("Geçerli sembol listesi (exchangeInfo) çekilemedi, önbellek varsa kullanılıyor")
+                if self._valid_symbols_cache is None:
+                    return set()  # ilk denemede de başarısız olduysa boş dön, hiçbir şey elenmez ama aday da çıkmaz
+        return self._valid_symbols_cache
+
     async def scan_once(self) -> list[ScanResult]:
         tickers = await self._data_layer.get_24hr_tickers()
-        # Sadece USDT-M perpetual'lar; garip/az likit sembolleri elemek için
-        # minimum bir hacim eşiği koymuyoruz çünkü top-50 zaten bunu doğal
-        # olarak filtreliyor.
-        usable = [t for t in tickers if t.get("symbol", "").endswith("USDT")]
+        valid_symbols = await self._get_valid_symbols()
+        # Sadece USDT-M perpetual'lar; TradFi-Perps (contractType=TRADIFI_PERPETUAL,
+        # örn. TSLAUSDT/XAUUSDT) valid_symbols'ta olmadığı için otomatik eleniyor.
+        # Az/likit sembolleri elemek için ayrı bir hacim eşiği koymuyoruz çünkü
+        # top-N zaten bunu doğal olarak filtreliyor.
+        usable = [
+            t for t in tickers
+            if t.get("symbol", "").endswith("USDT") and (not valid_symbols or t["symbol"] in valid_symbols)
+        ]
         self.last_scanned_count = len(usable)
 
         by_gain = sorted(usable, key=lambda t: float(t["priceChangePercent"]), reverse=True)
