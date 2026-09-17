@@ -61,11 +61,16 @@ class ExecutionEngine:
         old_id = self._stop_order_ids.get(symbol)
         if old_id is not None:
             try:
-                await self._client.cancel_order(symbol, old_id)
+                # KRİTİK: bu artık bir Algo Order (stop/TP), algoId ile iptal
+                # edilmeli — normal cancel_order (orderId) İŞE YARAMIYOR ve
+                # eski emir borsada kalıp yenisinin açılmasını -4130 ile
+                # engelliyordu ("An open stop or take profit order ... is
+                # existing").
+                await self._client.cancel_algo_order(old_id)
             except Exception:
-                logger.exception("%s: eski stop emri iptal edilemedi (order_id=%s)", symbol, old_id)
+                logger.exception("%s: eski stop emri iptal edilemedi (algo_id=%s)", symbol, old_id)
         order = await self._client.new_stop_market_order(symbol, _EXIT_SIDE[side], price)
-        self._stop_order_ids[symbol] = order.get("orderId")
+        self._stop_order_ids[symbol] = order.get("algoId")
         logger.info("%s: stop güncellendi -> %s", symbol, price)
 
     async def update_take_profit(self, symbol: str, side: str, new_tp_price: float) -> None:
@@ -73,11 +78,11 @@ class ExecutionEngine:
         old_id = self._tp_order_ids.get(symbol)
         if old_id is not None:
             try:
-                await self._client.cancel_order(symbol, old_id)
+                await self._client.cancel_algo_order(old_id)
             except Exception:
-                logger.exception("%s: eski TP emri iptal edilemedi (order_id=%s)", symbol, old_id)
+                logger.exception("%s: eski TP emri iptal edilemedi (algo_id=%s)", symbol, old_id)
         order = await self._client.new_take_profit_market_order(symbol, _EXIT_SIDE[side], price)
-        self._tp_order_ids[symbol] = order.get("orderId")
+        self._tp_order_ids[symbol] = order.get("algoId")
         logger.info("%s: TP güncellendi -> %s", symbol, price)
 
     async def cancel_open_orders(self, symbol: str) -> None:
