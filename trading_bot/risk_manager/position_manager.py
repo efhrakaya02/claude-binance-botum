@@ -147,6 +147,15 @@ class PositionManager:
         if is_new_peak:
             position.peak_favorable_price = current_price
 
+        # --- Trend Mode aktivasyonu (Faz D) -----------------------------------
+        # Zirve güçlü bir eşiği geçtiyse (gerçek mega-trend kanıtı), dönüş
+        # tespiti artık 1h'ye geçecek (orchestrator._detect_reversal buna göre
+        # davranır) — pozisyon sıradan 15m gürültüsüyle erken kapanmasın.
+        peak_raw = self.raw_move_pct(position, position.peak_favorable_price)
+        if not position.trend_mode and peak_raw >= self._cfg.trend_mode_peak_pct:
+            position.trend_mode = True
+            logger.info("%s: Trend Mode aktif oldu (zirve %%%.1f) — dönüş tespiti artık 1h'ye geçti", position.symbol, peak_raw)
+
         # --- Faz B: ATR bazlı trailing (trailing_activate_pct -> breakeven_trigger_pct) ---
         if self._cfg.trailing_activate_pct <= raw < self._cfg.breakeven_trigger_pct:
             if not position.trailing_active:
@@ -156,7 +165,20 @@ class PositionManager:
             # Stop, anlık fiyatı ATR*atr_multiplier mesafeden takip eder —
             # ama SADECE lehte yönde günceller, asla geri gitmez.
             atr_distance = position.atr * self._cfg.atr_multiplier
-            candidate_stop = current_price - direction * atr_distance
+            atr_candidate = current_price - direction * atr_distance
+
+            # Ayrıca zirvenin trailing_lock_ratio kadarını da TABAN olarak
+            # uyguluyoruz — aksi halde zirve Faz B'de yüksek bir noktaya
+            # ulaşıp geri çekilirse, sırf ATR mesafesi geniş diye kazancın
+            # büyük kısmı Faz C'ye hiç ulaşmadan geri verilebiliyordu.
+            peak_move_b = abs(position.peak_favorable_price - position.entry_price)
+            peak_ratio_candidate = position.entry_price + direction * peak_move_b * self._cfg.trailing_lock_ratio
+
+            candidate_stop = (
+                max(atr_candidate, peak_ratio_candidate)
+                if position.is_long
+                else min(atr_candidate, peak_ratio_candidate)
+            )
             if position.stop_price is None or (
                 candidate_stop > position.stop_price if position.is_long else candidate_stop < position.stop_price
             ):
