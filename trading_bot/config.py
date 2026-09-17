@@ -127,14 +127,20 @@ class AnalyzerConfig:
     # nispeten pahalı — az ama isabetli işlem stratejisi için 65'ten 72'ye
     # yükseltildi.
     actionable_confidence_threshold: float = 72.0
+    # Fiyat, son 1h taban/tepesinden bu yüzdeden fazla uzaklaşmışsa "artık geç
+    # kalınmış" sayılıp KATI bir kapıyla reddedilir — çoklu zaman dilimi onay
+    # zincirinin (4h+1h) doğal gecikmesi yüzünden, onay geldiğinde hareket
+    # genelde zaten ilerlemiş olur; bu kontrol "momentum bitip düzeltmeye
+    # geçtiğinde giriş yapma" sorununu doğrudan hedefliyor.
+    max_extension_pct: float = 15.0
 
 
 @dataclass
 class ScannerConfig:
     """Scanner modülü ayarları (şimdilik sabit, ileride scanner.py'ye taşınacak)."""
-    top_n_gainers: int = 50
-    top_n_losers: int = 50
-    top_n_volume: int = 50
+    top_n_gainers: int = 35   # önceki: 50 — daha az ama daha ekstrem hareketlere odaklan
+    top_n_losers: int = 35    # önceki: 50
+    top_n_volume: int = 35    # önceki: 50
     rescan_interval_seconds: int = 300  # 5 dakika
 
 
