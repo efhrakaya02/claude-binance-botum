@@ -137,6 +137,10 @@ class AnalyzerConfig:
     # genelde zaten ilerlemiş olur; bu kontrol "momentum bitip düzeltmeye
     # geçtiğinde giriş yapma" sorununu doğrudan hedefliyor.
     max_extension_pct: float = 15.0
+    # Genişleme eşiği aşılsa bile, timing_score bu oranın ÜZERİNDEYSE
+    # (momentum hâlâ güçlü) reddetmiyoruz — sadece hem uzak hem de momentum
+    # zayıfsa (gerçekten tükenmiş/geç kalınmış bir kurulum) reddediyoruz.
+    extension_momentum_override_ratio: float = 0.6
 
 
 @dataclass
