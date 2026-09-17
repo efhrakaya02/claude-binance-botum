@@ -36,6 +36,12 @@ class Position:
     # olsun olmasın her tick'te güncellenir; hem trailing stop hesabı hem
     # "en yüksek PNL" raporlaması bu alana dayanır.
     peak_favorable_price: float | None = None
+    # Zirve, güçlü bir trend eşiğini (cfg.trend_mode_peak_pct) geçtiğinde True
+    # olur — "bu artık sıradan bir kurulum değil, gerçek bir mega-trend"
+    # sinyali. Bu modda dönüş tespiti daha üst bir zaman dilimine (1h) geçer,
+    # böylece pozisyon 15m'deki sıradan gürültüyle erken kapanmaz; amaç
+    # trend'i mümkün olduğunca zirvesine (dönemsel ATH'a) kadar taşımak.
+    trend_mode: bool = False
 
     opened_at_ms: int = 0
     closed_at_ms: int | None = None
