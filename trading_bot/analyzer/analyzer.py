@@ -87,6 +87,37 @@ class MultiTimeframeAnalyzer:
         trend_1h = pa.determine_trend(swings_1h)
         structure_break_1h = pa.detect_structure_break(candles_1h, swings_1h, macro_trend)
 
+        # ---- Genişleme (extension) kontrolü — KATI kapı ---------------------
+        # "Momentum kaybolup düzeltme evresine geçtiğinde işlem açma" sorununun
+        # kök nedeni: 4h/1h onay zinciri doğası gereği gecikmeli (swing/BOS'un
+        # teyit edilmesi kapanmış mumlar gerektirir). Onay geldiğinde hareket
+        # genelde zaten epey ilerlemiş olabilir. Bu kontrol, fiyatın son 1h
+        # tabanından (LONG) / tepesinden (SHORT) ne kadar uzaklaştığını ölçüp,
+        # eşiği aşan (yani "artık geç kalınmış") kurulumları reddeder —
+        # "hareketin başında yakala" hedefini burada zorluyoruz.
+        last_low_1h = next((s for s in reversed(swings_1h) if s.type == pa.SwingType.LOW), None)
+        last_high_1h = next((s for s in reversed(swings_1h) if s.type == pa.SwingType.HIGH), None)
+        current_close = candles_1h[-1].close
+
+        if side == "LONG" and last_low_1h is not None and last_low_1h.price > 0:
+            extension_pct = (current_close - last_low_1h.price) / last_low_1h.price * 100
+        elif side == "SHORT" and last_high_1h is not None and last_high_1h.price > 0:
+            extension_pct = (last_high_1h.price - current_close) / last_high_1h.price * 100
+        else:
+            extension_pct = 0.0  # referans swing yoksa genişleme ölçülemiyor, engellemiyoruz
+
+        if extension_pct > self._cfg.max_extension_pct:
+            return Signal(
+                symbol=symbol, side=side, macro_trend=macro_trend, macro_confirmed=True,
+                entry_confirmed=False, timing_confirmed=False, entry_score=0.0, timing_score=0.0,
+                suggested_entry_price=None, confidence=0.0, is_actionable=False,
+                reasons=[
+                    f"4h makro yön: {macro_trend.value}",
+                    f"Genişleme çok fazla: son 1h taban/tepeden %{extension_pct:.1f} uzaklaşmış "
+                    f"(eşik %{self._cfg.max_extension_pct:.0f}) — hareket zaten ilerlemiş, geç kalınmış",
+                ],
+            )
+
         aligned_1h = trend_1h == macro_trend
         bos_confirms = structure_break_1h is not None and structure_break_1h.kind == "BOS"
         entry_confirmed = aligned_1h and bos_confirms  # bilgi amaçlı: TAM onay var mı
