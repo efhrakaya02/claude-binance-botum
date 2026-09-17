@@ -54,6 +54,10 @@ class MultiTimeframeAnalyzer:
         self._data_layer = data_layer
         self._cfg = cfg or AnalyzerConfig()
 
+    @property
+    def cfg(self) -> AnalyzerConfig:
+        return self._cfg
+
     def analyze(self, symbol: str) -> Signal | None:
         candles_4h = self._data_layer.get_klines(symbol, "4h")
         candles_1h = self._data_layer.get_klines(symbol, "1h")
@@ -86,37 +90,6 @@ class MultiTimeframeAnalyzer:
         swings_1h = pa.find_swing_points(candles_1h, lookback=2)
         trend_1h = pa.determine_trend(swings_1h)
         structure_break_1h = pa.detect_structure_break(candles_1h, swings_1h, macro_trend)
-
-        # ---- Genişleme (extension) kontrolü — KATI kapı ---------------------
-        # "Momentum kaybolup düzeltme evresine geçtiğinde işlem açma" sorununun
-        # kök nedeni: 4h/1h onay zinciri doğası gereği gecikmeli (swing/BOS'un
-        # teyit edilmesi kapanmış mumlar gerektirir). Onay geldiğinde hareket
-        # genelde zaten epey ilerlemiş olabilir. Bu kontrol, fiyatın son 1h
-        # tabanından (LONG) / tepesinden (SHORT) ne kadar uzaklaştığını ölçüp,
-        # eşiği aşan (yani "artık geç kalınmış") kurulumları reddeder —
-        # "hareketin başında yakala" hedefini burada zorluyoruz.
-        last_low_1h = next((s for s in reversed(swings_1h) if s.type == pa.SwingType.LOW), None)
-        last_high_1h = next((s for s in reversed(swings_1h) if s.type == pa.SwingType.HIGH), None)
-        current_close = candles_1h[-1].close
-
-        if side == "LONG" and last_low_1h is not None and last_low_1h.price > 0:
-            extension_pct = (current_close - last_low_1h.price) / last_low_1h.price * 100
-        elif side == "SHORT" and last_high_1h is not None and last_high_1h.price > 0:
-            extension_pct = (last_high_1h.price - current_close) / last_high_1h.price * 100
-        else:
-            extension_pct = 0.0  # referans swing yoksa genişleme ölçülemiyor, engellemiyoruz
-
-        if extension_pct > self._cfg.max_extension_pct:
-            return Signal(
-                symbol=symbol, side=side, macro_trend=macro_trend, macro_confirmed=True,
-                entry_confirmed=False, timing_confirmed=False, entry_score=0.0, timing_score=0.0,
-                suggested_entry_price=None, confidence=0.0, is_actionable=False,
-                reasons=[
-                    f"4h makro yön: {macro_trend.value}",
-                    f"Genişleme çok fazla: son 1h taban/tepeden %{extension_pct:.1f} uzaklaşmış "
-                    f"(eşik %{self._cfg.max_extension_pct:.0f}) — hareket zaten ilerlemiş, geç kalınmış",
-                ],
-            )
 
         aligned_1h = trend_1h == macro_trend
         bos_confirms = structure_break_1h is not None and structure_break_1h.kind == "BOS"
@@ -165,6 +138,46 @@ class MultiTimeframeAnalyzer:
             )
 
         timing_confirmed = confirmed_tf_count >= 2  # bilgi amaçlı: eski davranışa denk gelen özet
+
+        # ---- Genişleme (extension) kontrolü — MOMENTUM'A BAĞLI kapı ----------
+        # Eskiden bu kontrol TEK BAŞINA (momentumdan bağımsız) reddediyordu —
+        # bu, "%2-3 pompalayıp tükenen" kurulumla "%90-130 devam eden gerçek
+        # mega-trend"i AYNI KEFEYE koyuyordu; ikincisi tam da botun yakalamak
+        # için var olduğu şey. Artık genişleme TEK BAŞINA yeterli değil: sadece
+        # hem UZAK hem de momentum ZAYIFLAMIŞSA (timing_score düşükse) "geç
+        # kalınmış/tükenmiş" sayılıp reddediliyor. Momentum hâlâ güçlüyse
+        # (hacim/momentum kanıtı sürüyorsa) uzaklık tek başına engel değil —
+        # hareket hâlâ devam ediyor demektir, tam da binmek istediğimiz şey.
+        last_low_1h = next((s for s in reversed(swings_1h) if s.type == pa.SwingType.LOW), None)
+        last_high_1h = next((s for s in reversed(swings_1h) if s.type == pa.SwingType.HIGH), None)
+        current_close = candles_1h[-1].close
+
+        if side == "LONG" and last_low_1h is not None and last_low_1h.price > 0:
+            extension_pct = (current_close - last_low_1h.price) / last_low_1h.price * 100
+        elif side == "SHORT" and last_high_1h is not None and last_high_1h.price > 0:
+            extension_pct = (last_high_1h.price - current_close) / last_high_1h.price * 100
+        else:
+            extension_pct = 0.0  # referans swing yoksa genişleme ölçülemiyor, engellemiyoruz
+
+        momentum_still_strong = timing_score >= self._cfg.extension_momentum_override_ratio * self._cfg.timing_weight
+
+        if extension_pct > self._cfg.max_extension_pct and not momentum_still_strong:
+            return Signal(
+                symbol=symbol, side=side, macro_trend=macro_trend, macro_confirmed=True,
+                entry_confirmed=entry_confirmed, timing_confirmed=timing_confirmed,
+                entry_score=round(entry_score, 1), timing_score=round(timing_score, 1),
+                suggested_entry_price=None, confidence=0.0, is_actionable=False,
+                reasons=reasons + [
+                    f"Genişleme çok fazla VE momentum zayıf: son 1h taban/tepeden %{extension_pct:.1f} "
+                    f"uzaklaşmış (eşik %{self._cfg.max_extension_pct:.0f}), timing_score={timing_score:.1f}/"
+                    f"{self._cfg.timing_weight:.0f} — hareket tükenmiş görünüyor, geç kalınmış",
+                ],
+            )
+        if extension_pct > self._cfg.max_extension_pct and momentum_still_strong:
+            reasons.append(
+                f"Uzak (%{extension_pct:.1f}) ama momentum hâlâ güçlü (timing_score={timing_score:.1f}) "
+                f"— hareket devam ediyor sayılıp REDDEDİLMEDİ"
+            )
 
         suggested_entry_price = candles_1m[-1].close if candles_1m else None
 
