@@ -35,6 +35,11 @@ from .scanner import Scanner, ScanResult
 logger = logging.getLogger(__name__)
 
 MONITOR_POLL_INTERVAL_SECONDS = 3.0
+# Sadece pozisyonu OLMAYAN ama izlenen sembolleri (fırsat değerlendirme +
+# akıllı yeniden giriş) kontrol eden döngünün sıklığı. Scanner'ın 5dk'lık
+# tarama döngüsünden BAĞIMSIZ ve ondan çok daha hızlı — bir coin scanner'ın
+# bir sonraki turunu beklemeden, hareketi başladığı an değerlendirilir.
+EVALUATION_POLL_INTERVAL_SECONDS = 5.0
 SYMBOL_WARMUP_SECONDS = 5.0  # add_symbol sonrası buffer'ların dolması için kısa bekleme
 # Risk yönetimi (sweep/breakeven/trailing) HIZLI kalmalı — bu yüzden ayrı,
 # sadece bilgilendirme amaçlı bir log döngüsü kullanıyoruz; onu yavaşlatmak
@@ -53,12 +58,6 @@ SYMBOL_WATCH_TTL_SECONDS = 1800.0  # 30 dakika (~6 tarama döngüsü)
 # aynı ~60 sembolün sürekli aday olarak kalıp yeni adaylara hiç yer
 # bırakmadığı gözlemlendi (0 açık pozisyonken bile kapasite sürekli doluydu).
 MAX_WATCHED_SYMBOLS = 100
-
-# Bir sembol hard stop'a (Faz A/B/C stop seviyesi) takılarak ZARARLA
-# kapanırsa, aynı zayıf kurulumu hemen tekrar denememesi için bu süre
-# boyunca aday olarak değerlendirilmez. Sweep sonrası çıkışları KAPSAMAZ —
-# o zaten kendi (hızlı) izleme/yeniden-giriş mekanizmasına sahip.
-STOP_LOSS_COOLDOWN_SECONDS = 1200.0  # 20 dakika
 
 # "Daha büyük fırsat için slot boşaltma" (preemption) güvenlik sınırları.
 # 2026-09-14'te CAPUSDT->AVAAIUSDT->FLOCKUSDT'nin saniyeler içinde art arda
@@ -96,8 +95,9 @@ class Orchestrator:
         self._stop_event = asyncio.Event()
         # symbol -> en son ne zaman scanner adayı olarak seçildiği (budama için)
         self._symbol_last_candidate_ts: dict[str, float] = {}
-        # symbol -> bu zamana kadar (time.time()) soğumada, aday olarak değerlendirilmez
-        self._symbol_cooldown_until: dict[str, float] = {}
+        # symbol -> (son gönderilen stop fiyatı, ne zaman gönderildiği) — Binance'e
+        # gereksiz sık stop güncellemesi göndermemek için (bkz. _monitor_once).
+        self._last_stop_push: dict[str, tuple[float, float]] = {}
 
     async def start(self) -> None:
         await self._data_layer.start()
@@ -113,6 +113,7 @@ class Orchestrator:
 
         self._tasks.append(asyncio.create_task(self._scanner.run(self._on_candidates), name="scanner"))
         self._tasks.append(asyncio.create_task(self._monitor_loop(), name="monitor"))
+        self._tasks.append(asyncio.create_task(self._continuous_evaluation_loop(), name="continuous_evaluation"))
         self._tasks.append(asyncio.create_task(self._position_status_log_loop(), name="position_status_log"))
         logger.info("Orchestrator başlatıldı (testnet=%s, dry_run=%s)", self._testnet, self._dry_run)
 
@@ -139,12 +140,6 @@ class Orchestrator:
         for c in candidates:
             self._symbol_last_candidate_ts[c.symbol] = now
 
-            if self._is_in_cooldown(c.symbol, now):
-                logger.info(
-                    "%s: soğuma süresinde (son stop-loss sonrası), bu tarama döngüsünde atlanıyor", c.symbol
-                )
-                continue
-
             if c.symbol in self._data_layer.watched_symbols:
                 await self._try_enter(c.symbol)
                 continue
@@ -162,17 +157,87 @@ class Orchestrator:
             # ısınma payı bırakıyoruz.
             asyncio.create_task(self._try_enter_after_warmup(c.symbol))
 
-    def _is_in_cooldown(self, symbol: str, now: float | None = None) -> bool:
-        until = self._symbol_cooldown_until.get(symbol)
-        if until is None:
-            return False
-        return (now if now is not None else time.time()) < until
+    async def _continuous_evaluation_loop(self) -> None:
+        """Scanner'ın 5dk'lık tarama döngüsünden BAĞIMSIZ ve ondan çok daha
+        hızlı çalışır. İzlenen ama pozisyonu OLMAYAN her sembol için:
+        - hiç işlem görmediyse veya izleme (TRACKING) süresi dolduysa: normal
+          giriş kontrolü (_try_enter) — scanner'ın bir sonraki turunu
+          BEKLEMEDEN, hareket başladığı an değerlendirilir. Böylece bir coin
+          aday listesine sadece bir kez girip sonra düşse bile kaçırılmaz.
+        - izlemedeyse (TRACKING — kapandı, momentum/düzeltme takip ediliyor):
+          akıllı yeniden giriş kontrolü.
+        Hiçbir yeni Binance API çağrısı gerektirmez — zaten akan mum/orderbook
+        verisi üzerinden bellek içi hesaplama, bu yüzden sık çalıştırmak ucuz."""
+        while not self._stop_event.is_set():
+            try:
+                await self._evaluate_watched_symbols_once()
+            except Exception:
+                logger.exception("Sürekli değerlendirme döngüsünde hata")
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=EVALUATION_POLL_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
 
-    def _start_cooldown(self, symbol: str) -> None:
-        self._symbol_cooldown_until[symbol] = time.time() + STOP_LOSS_COOLDOWN_SECONDS
-        logger.info(
-            "%s: stop-loss sonrası %d dakika soğumaya alındı", symbol, int(STOP_LOSS_COOLDOWN_SECONDS // 60)
+    async def _evaluate_watched_symbols_once(self) -> None:
+        now_ms = int(time.time() * 1000)
+        for symbol in list(self._data_layer.watched_symbols):
+            if symbol in self._position_manager.open_positions:
+                continue
+
+            if symbol in self._position_manager.tracked_opportunities:
+                await self._evaluate_reentry(symbol, now_ms)
+                continue
+
+            await self._try_enter(symbol)
+
+    async def _evaluate_reentry(self, symbol: str, now_ms: int) -> None:
+        if self._position_manager.is_tracking_expired(symbol, now_ms, self._risk_cfg.max_tracking_minutes):
+            self._position_manager.abandon_tracking(symbol)
+            return
+
+        if not self._position_manager.has_free_slot():
+            return
+
+        tracked = self._position_manager.tracked_opportunities.get(symbol)
+        if tracked is None:
+            return
+
+        # (a) Momentum HÂLÂ objektif olarak güçlü mü — gerçek bir düzeltme hiç
+        #     başlamamış olabilir, bu durumda beklemeye gerek yok.
+        momentum_strong = self._analyzer.timing_score_for(symbol, tracked.side) >= (
+            self._analyzer.cfg.extension_momentum_override_ratio * self._analyzer.cfg.timing_weight
         )
+        # (b) Momentum zayıflamıştı ama artık orijinal yönde TAZE bir BOS var
+        #     mı — düzeltme bitmiş, hareket kaldığı yerden devam ediyor.
+        resumed = self._detect_resumption(symbol, tracked.side)
+
+        if not self._position_manager.should_reenter(symbol, momentum_strong, resumed):
+            return
+
+        entry_price = self._current_price(symbol)
+        if entry_price is None:
+            return
+        safety = self._liquidation_engine.check_entry_safety(symbol, tracked.side, entry_price)
+        if not safety.is_safe:
+            return
+
+        assert self._execution_engine is not None
+        try:
+            quantity, fill_price = await self._execution_engine.open_position(
+                symbol, tracked.side, self._risk_cfg.margin_per_position_usdt, self._risk_cfg.max_leverage
+            )
+        except Exception:
+            logger.exception("%s: yeniden giriş emri başarısız", symbol)
+            return
+        reentered_position = self._position_manager.reenter(symbol, fill_price, quantity, self._get_atr(symbol))
+        if reentered_position.stop_price is not None:
+            try:
+                await self._execution_engine.update_stop(
+                    symbol, reentered_position.side, reentered_position.stop_price
+                )
+                self._last_stop_push[symbol] = (reentered_position.stop_price, time.time())
+            except Exception:
+                logger.exception("%s: yeniden giriş sonrası başlangıç stop emri gönderilemedi", symbol)
 
     async def _prune_stale_symbols(self) -> None:
         """Pozisyonu/izlenen fırsatı olmayan ve uzun süredir aday olarak
@@ -198,6 +263,8 @@ class Orchestrator:
     async def _try_enter(self, symbol: str) -> None:
         if symbol in self._position_manager.open_positions:
             return  # zaten açık
+        if symbol in self._position_manager.tracked_opportunities:
+            return  # izlemede — yeniden giriş kararı _evaluate_reentry'nin işi
 
         signal = self._analyzer.analyze(symbol)
         if signal is None:
@@ -300,8 +367,8 @@ class Orchestrator:
         except Exception:
             logger.exception("%s: kalan emirler temizlenirken hata (önemli değil, devam ediliyor)", symbol)
         closed = self._position_manager.close_position(symbol, last_known_price, reason="borsada_zaten_kapanmis")
-        if closed is not None and closed.realized_pnl_usdt is not None and closed.realized_pnl_usdt < 0:
-            self._start_cooldown(symbol)
+        if closed is not None:
+            self._position_manager.track_for_resumption(closed)
 
     async def _close_position(self, symbol: str, reason: str) -> None:
         position = self._position_manager.open_positions.get(symbol)
@@ -355,6 +422,7 @@ class Orchestrator:
                     logger.exception("%s: sweep sonrası kapatma emri başarısız", symbol)
                     continue
                 self._position_manager.handle_sweep_exit(position, current_price)
+                self._last_stop_push.pop(symbol, None)
                 continue
 
             # 1b) Durgunluk zaman aşımı — Faz B'ye (momentum kanıtlanması)
@@ -380,14 +448,34 @@ class Orchestrator:
                     logger.exception("%s: durgunluk zaman aşımı kapatması başarısız", symbol)
                     continue
                 closed = self._position_manager.close_position(symbol, current_price, "stagnant_timeout")
-                if closed is not None and closed.realized_pnl_usdt is not None and closed.realized_pnl_usdt < 0:
-                    self._start_cooldown(symbol)
+                if closed is not None:
+                    self._position_manager.track_for_resumption(closed)
+                self._last_stop_push.pop(symbol, None)
                 continue
 
             # 2) Ters yönde yapı kırılımı (zirve/tersine dönüş sinyali)
             reversal_signal = self._detect_reversal(symbol, position.side, position.trend_mode)
 
-            action = self._position_manager.update_position_risk(position, current_price, reversal_signal)
+            # 2b) Momentum zayıflama takibi — sadece Faz B/C'ye (trailing
+            #     aktif) ulaşmış pozisyonlar için hesaplanır (öncesinde zaten
+            #     sabit ATR stop'u var, fading'in bir etkisi olmaz). Tam bir
+            #     dönüş sinyali DEĞİL — "rüzgar değişiyor" sezgisi, stop'u
+            #     normalden daha sıkı bir oranla kilitlemeye yarar.
+            momentum_fading = False
+            if position.trailing_active:
+                strength = self._analyzer.timing_score_for(symbol, position.side)
+                momentum_fading = strength < (
+                    self._analyzer.cfg.extension_momentum_override_ratio * self._analyzer.cfg.timing_weight
+                )
+
+            was_breakeven = position.breakeven_triggered
+            was_trend_mode = position.trend_mode
+            action = self._position_manager.update_position_risk(
+                position, current_price, reversal_signal, momentum_fading
+            )
+            just_transitioned = (not was_breakeven and position.breakeven_triggered) or (
+                not was_trend_mode and position.trend_mode
+            )
 
             if action.close_position:
                 try:
@@ -402,25 +490,35 @@ class Orchestrator:
                     logger.exception("%s: hedef kapatma emri başarısız", symbol)
                     continue
                 closed = self._position_manager.close_position(symbol, current_price, action.close_reason or "target")
-                # Cooldown SADECE gerçek zararda uygulanmalı — "stop_price_reached"
-                # hem gerçek erken zararlarda (Faz A/B) hem de Faz C'nin kâr
-                # kilitleyen trailing stop'unda (zirveden geri çekilince kârla
-                # çıkış) aynı metinle oluşuyor. Metne değil, gerçekleşen PNL'in
-                # işaretine bakmak gerekiyor.
-                if closed is not None and closed.realized_pnl_usdt is not None and closed.realized_pnl_usdt < 0:
-                    self._start_cooldown(symbol)
+                if closed is not None:
+                    self._position_manager.track_for_resumption(closed)
+                self._last_stop_push.pop(symbol, None)
                 continue
 
             if action.update_stop is not None:
-                try:
-                    await self._execution_engine.update_stop(symbol, position.side, action.update_stop)
-                except BinanceAPIError as e:
-                    if e.indicates_no_open_position:
-                        await self._sync_closed_externally(symbol, position, current_price)
-                        continue
-                    logger.exception("%s: stop güncellenemedi", symbol)
-                except Exception:
-                    logger.exception("%s: stop güncellenemedi", symbol)
+                # Binance'teki GERÇEK emri seyrek güncelliyoruz (bkz.
+                # RiskConfig.min_stop_push_interval_seconds) — botun kendi
+                # dahili kontrolü (stop_price geçişi) HER tick'te çalışmaya
+                # devam ediyor, bu sadece borsadaki yedek emrin gereksiz sık
+                # API çağrısıyla senkronize edilmesini önlüyor. Faz geçişleri
+                # (breakeven, Trend Mode) her zaman ANINDA gönderiliyor.
+                last_push = self._last_stop_push.get(symbol)
+                should_push = (
+                    last_push is None
+                    or just_transitioned
+                    or (time.time() - last_push[1]) >= self._risk_cfg.min_stop_push_interval_seconds
+                )
+                if should_push:
+                    try:
+                        await self._execution_engine.update_stop(symbol, position.side, action.update_stop)
+                        self._last_stop_push[symbol] = (action.update_stop, time.time())
+                    except BinanceAPIError as e:
+                        if e.indicates_no_open_position:
+                            await self._sync_closed_externally(symbol, position, current_price)
+                            continue
+                        logger.exception("%s: stop güncellenemedi", symbol)
+                    except Exception:
+                        logger.exception("%s: stop güncellenemedi", symbol)
             if action.update_tp is not None:
                 try:
                     await self._execution_engine.update_take_profit(symbol, position.side, action.update_tp)
@@ -431,35 +529,6 @@ class Orchestrator:
                     logger.exception("%s: TP güncellenemedi", symbol)
                 except Exception:
                     logger.exception("%s: TP güncellenemedi", symbol)
-
-        # 3) Sweep sonrası TRACKING'deki fırsatlar: hareket devam ediyorsa yeniden gir
-        for symbol in list(self._position_manager.tracked_opportunities.keys()):
-            if not self._position_manager.has_free_slot():
-                continue
-            tracked = self._position_manager.tracked_opportunities[symbol]
-            resumed = self._detect_resumption(symbol, tracked.side)
-            if self._position_manager.should_reenter(symbol, self._current_price(symbol) or 0.0, resumed):
-                entry_price = self._current_price(symbol)
-                if entry_price is None:
-                    continue
-                safety = self._liquidation_engine.check_entry_safety(symbol, tracked.side, entry_price)
-                if not safety.is_safe:
-                    continue
-                try:
-                    quantity, fill_price = await self._execution_engine.open_position(
-                        symbol, tracked.side, self._risk_cfg.margin_per_position_usdt, self._risk_cfg.max_leverage
-                    )
-                except Exception:
-                    logger.exception("%s: yeniden giriş emri başarısız", symbol)
-                    continue
-                reentered_position = self._position_manager.reenter(symbol, fill_price, quantity, self._get_atr(symbol))
-                if reentered_position.stop_price is not None:
-                    try:
-                        await self._execution_engine.update_stop(
-                            symbol, reentered_position.side, reentered_position.stop_price
-                        )
-                    except Exception:
-                        logger.exception("%s: yeniden giriş sonrası başlangıç stop emri gönderilemedi", symbol)
 
     # ------------------------------------------------------------------ #
     # Bilgilendirme amaçlı işlem takip logu (2 dakikada bir)
@@ -537,9 +606,13 @@ class Orchestrator:
 
     def _detect_resumption(self, symbol: str, side: str) -> bool:
         """Düzeltme sonrası hareketin kaldığı yerden (orijinal yönde) devam
-        ettiğinin sezgisi: 1m'de o yönde tekrar BOS."""
+        ettiğinin sezgisi: 15m'de o yönde tekrar BOS. Önceden 1m kontrol
+        ediliyordu — ama 1m'deki bir BOS çok kolay yanlış pozitif üretiyor
+        (sıradan bir sıçrama bile "devam" gibi görünebilir), bu da düzeltme
+        tam bitmeden erken yeniden girip kazancı geri vermeye yol açıyordu.
+        15m çok daha güvenilir bir "düzeltme gerçekten bitti" teyidi."""
         prevailing = Trend.UP if side == "LONG" else Trend.DOWN
-        candles = self._data_layer.get_klines(symbol, "1m")
+        candles = self._data_layer.get_klines(symbol, "15m")
         if not candles:
             return False
         swings = find_swing_points(candles, lookback=2)
