@@ -116,6 +116,21 @@ class RiskConfig:
     # taşımak. 8.0 seçildi çünkü bu seviyeye ulaşan bir hareket artık şansa
     # değil gerçek bir trende işaret eder.
     trend_mode_peak_pct: float = 8.0
+    # Momentum zayıflama tespit edildiğinde (Faz B/C'de, henüz tam dönüş
+    # sinyali yokken) geçici olarak kullanılan DAHA SIKI kilitleme oranı —
+    # "rüzgar değişiyor" sezildiğinde stop'u normalden daha çabuk yaklaştırır,
+    # ama pozisyonu tam kapatmaz (o karar hâlâ reversal_signal'ın işi).
+    trailing_lock_ratio_fading: float = 0.6
+    # Bir sembol kapandıktan sonra ne kadar süre "izlemede" (TrackedOpportunity)
+    # tutulup akıllı yeniden giriş için değerlendirilir. Bu süre dolunca
+    # tamamen terk edilir (normal TTL budamasına döner).
+    max_tracking_minutes: float = 60.0
+    # Binance'teki GERÇEK stop emrini güncelleme sıklığı sınırı — botun kendi
+    # dahili kontrolü her tick'te (saniyeler içinde) çalışmaya devam eder,
+    # bu sadece borsadaki YEDEK emrin ne sıklıkla senkronize edileceğini
+    # sınırlar (gereksiz API trafiğini ve senkronizasyon bug'larını azaltmak
+    # için). Faz geçişleri (breakeven, Trend Mode) her zaman ANINDA gönderilir.
+    min_stop_push_interval_seconds: float = 25.0
 
 
 @dataclass
