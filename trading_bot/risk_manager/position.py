@@ -42,6 +42,10 @@ class Position:
     # böylece pozisyon 15m'deki sıradan gürültüyle erken kapanmaz; amaç
     # trend'i mümkün olduğunca zirvesine (dönemsel ATH'a) kadar taşımak.
     trend_mode: bool = False
+    # Faz B/C'deyken, ilgili zaman dilimlerindeki hacim+momentum skoru
+    # zayıflamaya başladığında True olur — tam bir dönüş sinyali değil ama
+    # "dikkatli ol" uyarısı; stop'u normalden daha sıkı bir oranla kilitler.
+    momentum_fading: bool = False
 
     opened_at_ms: int = 0
     closed_at_ms: int | None = None
