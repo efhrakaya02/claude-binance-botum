@@ -58,6 +58,21 @@ class MultiTimeframeAnalyzer:
     def cfg(self) -> AnalyzerConfig:
         return self._cfg
 
+    def timing_score_for(self, symbol: str, side: str) -> float:
+        """15m/5m/1m hacim+momentum skorunu TEK BAŞINA hesaplar (0..timing_weight).
+        Tam bir analiz (4h/1h) gerektirmez — pozisyon açıkken "momentum hâlâ
+        canlı mı" diye sürekli kontrol etmek veya izlenen bir fırsata yeniden
+        girip girmeyeceğine karar vermek için kullanılır."""
+        candles_15m = self._data_layer.get_klines(symbol, "15m")
+        candles_5m = self._data_layer.get_klines(symbol, "5m")
+        candles_1m = self._data_layer.get_klines(symbol, "1m")
+        if not all([candles_15m, candles_5m, candles_1m]):
+            return 0.0
+        score, _ = _compute_timing_score(
+            [(candles_15m, "15m"), (candles_5m, "5m"), (candles_1m, "1m")], side, self._cfg
+        )
+        return score
+
     def analyze(self, symbol: str) -> Signal | None:
         candles_4h = self._data_layer.get_klines(symbol, "4h")
         candles_1h = self._data_layer.get_klines(symbol, "1h")
@@ -109,34 +124,9 @@ class MultiTimeframeAnalyzer:
             reasons.append(f"1h onayı kısmi (skor {entry_score:.0f}/{self._cfg.entry_weight:.0f})")
 
         # ---- 15m/5m/1m: hacim + momentum ile zamanlama — KADEMELİ ----------
-        per_tf_weight = self._cfg.timing_weight / 3
-        timing_score = 0.0
-        confirmed_tf_count = 0
-        for tf_candles, tf_name in ((candles_15m, "15m"), (candles_5m, "5m"), (candles_1m, "1m")):
-            vol_ratio = pa.volume_anomaly_ratio(tf_candles)
-            roc = pa.momentum_roc(tf_candles, periods=5)
-            momentum_aligned = (roc > 0 and side == "LONG") or (roc < 0 and side == "SHORT")
-
-            if not momentum_aligned:
-                # Yön ters ise bu zaman diliminden puan yok — momentum yönü
-                # hâlâ katı bir alt-kapı (aksi halde ters sinyale de puan
-                # vermiş oluruz, bu kaliteyi değil miktarı artırır).
-                continue
-
-            # Hacim oranı hedefin ALTINDA kalsa bile ORANTILI kısmi puan
-            # veriliyor — eskiden 1.49x bile 0 sayılıyordu, artık 1.49/1.5
-            # oranında (neredeyse tam) puan alıyor.
-            ratio_score = min(vol_ratio / self._cfg.timing_target_volume_ratio, 1.0)
-            tf_score = ratio_score * per_tf_weight
-            timing_score += tf_score
-
-            if ratio_score >= 1.0:
-                confirmed_tf_count += 1
-            reasons.append(
-                f"{tf_name}: hacim anomalisi x{vol_ratio:.2f} (hedef x{self._cfg.timing_target_volume_ratio:.1f}), "
-                f"momentum {roc:+.2f}% (yönle uyumlu) -> {tf_score:.1f}/{per_tf_weight:.1f} puan"
-            )
-
+        timing_score, confirmed_tf_count = _compute_timing_score(
+            [(candles_15m, "15m"), (candles_5m, "5m"), (candles_1m, "1m")], side, self._cfg, reasons
+        )
         timing_confirmed = confirmed_tf_count >= 2  # bilgi amaçlı: eski davranışa denk gelen özet
 
         # ---- Genişleme (extension) kontrolü — MOMENTUM'A BAĞLI kapı ----------
@@ -200,3 +190,34 @@ class MultiTimeframeAnalyzer:
             is_actionable=is_actionable,
             reasons=reasons,
         )
+
+
+def _compute_timing_score(
+    timeframes: list[tuple[list, str]], side: str, cfg: AnalyzerConfig, reasons: list[str] | None = None
+) -> tuple[float, int]:
+    """15m/5m/1m hacim+momentum puanlamasının ortak çekirdeği. `analyze()` ve
+    `timing_score_for()` (pozisyon-içi momentum takibi, yeniden giriş kararı)
+    aynı bu fonksiyonu kullanır — tek bir yerde tanımlı tutmak için."""
+    per_tf_weight = cfg.timing_weight / 3
+    timing_score = 0.0
+    confirmed_tf_count = 0
+    for tf_candles, tf_name in timeframes:
+        vol_ratio = pa.volume_anomaly_ratio(tf_candles)
+        roc = pa.momentum_roc(tf_candles, periods=5)
+        momentum_aligned = (roc > 0 and side == "LONG") or (roc < 0 and side == "SHORT")
+
+        if not momentum_aligned:
+            continue
+
+        ratio_score = min(vol_ratio / cfg.timing_target_volume_ratio, 1.0)
+        tf_score = ratio_score * per_tf_weight
+        timing_score += tf_score
+
+        if ratio_score >= 1.0:
+            confirmed_tf_count += 1
+        if reasons is not None:
+            reasons.append(
+                f"{tf_name}: hacim anomalisi x{vol_ratio:.2f} (hedef x{cfg.timing_target_volume_ratio:.1f}), "
+                f"momentum {roc:+.2f}% (yönle uyumlu) -> {tf_score:.1f}/{per_tf_weight:.1f} puan"
+            )
+    return timing_score, confirmed_tf_count
