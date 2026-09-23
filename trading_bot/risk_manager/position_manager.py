@@ -129,11 +129,17 @@ class PositionManager:
         return raw if position.is_long else -raw
 
     def update_position_risk(
-        self, position: Position, current_price: float, reversal_signal: bool = False
+        self, position: Position, current_price: float, reversal_signal: bool = False,
+        momentum_fading: bool = False,
     ) -> RiskAction:
         action = RiskAction()
         raw = self.raw_move_pct(position, current_price)
         direction = 1 if position.is_long else -1
+        position.momentum_fading = momentum_fading
+        # Momentum zayıflarken normalden daha sıkı bir oran kullan — "rüzgar
+        # değişiyor" sezildiğinde daha erken kâr kilitler, ama pozisyonu
+        # KAPATMAZ (o karar hâlâ reversal_signal'ın işi).
+        effective_lock_ratio = self._cfg.trailing_lock_ratio_fading if momentum_fading else self._cfg.trailing_lock_ratio
 
         # --- Zirve takibi (trailing aktif olsun olmasın HER tick'te) ---------
         # "En yüksek PNL" raporlaması bu alana dayanıyor; trailing mantığından
@@ -172,7 +178,7 @@ class PositionManager:
             # ulaşıp geri çekilirse, sırf ATR mesafesi geniş diye kazancın
             # büyük kısmı Faz C'ye hiç ulaşmadan geri verilebiliyordu.
             peak_move_b = abs(position.peak_favorable_price - position.entry_price)
-            peak_ratio_candidate = position.entry_price + direction * peak_move_b * self._cfg.trailing_lock_ratio
+            peak_ratio_candidate = position.entry_price + direction * peak_move_b * effective_lock_ratio
 
             candidate_stop = (
                 max(atr_candidate, peak_ratio_candidate)
@@ -198,7 +204,7 @@ class PositionManager:
             # için (yukarıdaki takip bloğu) bu da yalnızca yükselir. Ayrıca hiçbir
             # zaman breakeven'ın (entry_price) altına düşmez.
             peak_move = abs(position.peak_favorable_price - position.entry_price)
-            locked_distance = peak_move * self._cfg.trailing_lock_ratio
+            locked_distance = peak_move * effective_lock_ratio
             candidate_stop = position.entry_price + direction * locked_distance
             floor_stop = position.entry_price  # breakeven — asla bunun altı olmaz
             new_stop = candidate_stop if (
@@ -252,12 +258,13 @@ class PositionManager:
         return action
 
     # ------------------------------------------------------------------ #
-    # Sweep sonrası hızlı çıkış + yeniden giriş döngüsü
+    # Kapanış sonrası izleme (TRACKING) + akıllı yeniden giriş
     # ------------------------------------------------------------------ #
-    def handle_sweep_exit(self, position: Position, current_price: float) -> Position:
-        """Sweep tespit edildiğinde çağrılır: kâr varsa hemen kilitleyip kapatır,
-        fırsatı TRACKING'e alır ki fiyat kaldığı yerden devam ederse tekrar girilsin."""
-        self.close_position(position.symbol, current_price, reason="sweep_exit")
+    def track_for_resumption(self, position: Position) -> None:
+        """Kapanan HERHANGİ bir pozisyonu (sadece sweep değil — stop, dönüş
+        sinyali, durgunluk zaman aşımı, ne olursa olsun) izlemeye alır. Fiyat
+        aynı yönde devam ederse ve momentum bunu destekliyorsa akıllıca
+        yeniden girilebilsin diye. `should_reenter()` bu kaydı kullanır."""
         position.status = PositionStatus.TRACKING
         self.tracked_opportunities[position.symbol] = TrackedOpportunity(
             symbol=position.symbol,
@@ -265,14 +272,42 @@ class PositionManager:
             original_position=position,
             tracked_since_ms=position.closed_at_ms or 0,
         )
-        logger.info("%s: sweep sonrası TRACKING'e alındı, düzeltme sonrası yeniden giriş bekleniyor", position.symbol)
+        logger.info("%s: kapanış sonrası izlemeye alındı (TRACKING)", position.symbol)
+
+    def handle_sweep_exit(self, position: Position, current_price: float) -> Position:
+        """Sweep tespit edildiğinde çağrılır: kâr varsa hemen kilitleyip kapatır,
+        fırsatı TRACKING'e alır ki fiyat kaldığı yerden devam ederse tekrar girilsin."""
+        self.close_position(position.symbol, current_price, reason="sweep_exit")
+        self.track_for_resumption(position)
         return position
 
-    def should_reenter(self, symbol: str, current_price: float, resumed_signal: bool) -> bool:
-        """Analyzer, hareketin kaldığı yerden devam ettiğini (BOS tekrar aynı yönde)
-        tespit ettiğinde resumed_signal=True gönderir; bu durumda yeniden giriş uygundur."""
+    def is_tracking_expired(self, symbol: str, now_ms: int, max_tracking_minutes: float) -> bool:
         tracked = self.tracked_opportunities.get(symbol)
-        return tracked is not None and resumed_signal
+        if tracked is None:
+            return False
+        age_minutes = (now_ms - tracked.tracked_since_ms) / 1000 / 60
+        return age_minutes > max_tracking_minutes
+
+    def abandon_tracking(self, symbol: str) -> None:
+        removed = self.tracked_opportunities.pop(symbol, None)
+        if removed is not None:
+            logger.info("%s: izleme süresi doldu, fırsat terk edildi", symbol)
+
+    def should_reenter(
+        self, symbol: str, momentum_strong: bool, resumed_signal: bool
+    ) -> bool:
+        """İki yoldan biriyle yeniden girişe izin verilir:
+        (a) momentum HÂLÂ objektif olarak güçlü (timing_score eşik üstü) —
+            gerçek bir düzeltme hiç başlamamış, hemen tekrar girilebilir;
+        (b) momentum zayıflamıştı ama artık orijinal yönde TAZE bir BOS var —
+            düzeltme bitmiş, hareket kaldığı yerden devam ediyor.
+        Bunların hiçbiri yoksa (uzak + hâlâ zayıf + taze BOS yok) beklemeye
+        devam edilir — sabit bir zamanlayıcı yerine gerçek piyasa durumu
+        karar veriyor."""
+        tracked = self.tracked_opportunities.get(symbol)
+        if tracked is None:
+            return False
+        return momentum_strong or resumed_signal
 
     def reenter(self, symbol: str, entry_price: float, quantity: float, atr: float) -> Position:
         tracked = self.tracked_opportunities.pop(symbol, None)
