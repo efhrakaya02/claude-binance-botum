@@ -146,3 +146,21 @@ def compute_atr(candles: list[Candle], period: int = 14) -> float | None:
         true_ranges.append(tr)
     recent = true_ranges[-period:]
     return sum(recent) / len(recent)
+
+
+def same_direction_streak(candles: list[Candle], side: str, max_lookback: int = 5) -> int:
+    """Son mumdan geriye doğru, işlem yönüyle aynı renkte (LONG: yeşil/
+    close>open, SHORT: kırmızı/close<open) KAÇ mumun art arda geldiğini
+    sayar (en fazla `max_lookback` kadar). Farklı renkli bir mumda durur.
+
+    Kullanım amacı: "son 4-5 mum hep aynı yönde kapandıysa ve fiyat bir
+    dirence/desteğe yaklaştıysa, kâr satışı/düzeltme riski yüksektir" —
+    tek başına genişleme yüzdesinden daha somut bir "tükenme" sezgisi."""
+    streak = 0
+    for c in reversed(candles[-max_lookback:]):
+        is_bullish = c.close > c.open
+        matches = is_bullish if side == "LONG" else not is_bullish
+        if not matches:
+            break
+        streak += 1
+    return streak
