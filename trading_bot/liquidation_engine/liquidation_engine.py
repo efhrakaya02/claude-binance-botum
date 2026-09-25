@@ -51,6 +51,10 @@ class LiquidationEngine:
         self._data_layer = data_layer
         self._cfg = cfg or LiquidationConfig()
 
+    @property
+    def cfg(self) -> LiquidationConfig:
+        return self._cfg
+
     # ------------------------------------------------------------------ #
     def check_entry_safety(self, symbol: str, side: str, entry_price: float) -> EntrySafetyResult:
         reasons: list[str] = []
