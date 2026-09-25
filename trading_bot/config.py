@@ -195,3 +195,12 @@ class LiquidationConfig:
     sweep_liquidation_usdt_threshold: float = 50_000.0
     # Orderbook derinliğinin bu oranın altına ani düşüşü de sweep sinyali sayılır.
     sweep_depth_drop_ratio: float = 0.4
+    # Giriş öncesi SON SANİYE teyidi: en iyi 20 seviyedeki toplam hacimde,
+    # işlem yönümüzü destekleyen tarafın (LONG için bid, SHORT için ask) payı
+    # bu oranın altındaysa giriş yapılmaz — "tam girerken satıcılar/alıcılar
+    # masaya oturuyor" senaryosunu önlemek için.
+    min_supporting_depth_ratio: float = 0.35
+    # Aynı son-saniye teyidinde, son N adet 1m mumdan en az kaçının işlem
+    # yönüyle aynı renkte olması gerektiği (en yeni mum her zaman dahil).
+    min_1m_confirming_candles: int = 4
+    confirm_1m_lookback: int = 5
