@@ -151,22 +151,36 @@ class MultiTimeframeAnalyzer:
 
         momentum_still_strong = timing_score >= self._cfg.extension_momentum_override_ratio * self._cfg.timing_weight
 
-        if extension_pct > self._cfg.max_extension_pct and not momentum_still_strong:
+        # "Son 4-5 mum hep aynı yönde + dirence/desteğe yakın" — genişleme
+        # yüzdesinden bağımsız, ayrı bir tükenme sezgisi. 4-5 ardışık aynı
+        # renkli mum, kâr satışının yakın olabileceğinin somut bir işareti;
+        # genişleme %'si henüz eşiği geçmemiş olsa bile bu tek başına riskli.
+        streak_1h = pa.same_direction_streak(candles_1h, side, max_lookback=5)
+        near_resistance = extension_pct >= self._cfg.max_extension_pct * 0.5
+        streak_into_resistance = streak_1h >= 4 and near_resistance
+
+        if (extension_pct > self._cfg.max_extension_pct or streak_into_resistance) and not momentum_still_strong:
+            reason = (
+                f"Genişleme çok fazla VE momentum zayıf: son 1h taban/tepeden %{extension_pct:.1f} "
+                f"uzaklaşmış (eşik %{self._cfg.max_extension_pct:.0f})"
+                if extension_pct > self._cfg.max_extension_pct
+                else (
+                    f"Son {streak_1h} mum (1h) art arda {side} yönünde VE dirence/desteğe yakın "
+                    f"(%{extension_pct:.1f} uzaklık) — kâr satışı/düzeltme riski yüksek"
+                )
+            )
             return Signal(
                 symbol=symbol, side=side, macro_trend=macro_trend, macro_confirmed=True,
                 entry_confirmed=entry_confirmed, timing_confirmed=timing_confirmed,
                 entry_score=round(entry_score, 1), timing_score=round(timing_score, 1),
                 suggested_entry_price=None, confidence=0.0, is_actionable=False,
-                reasons=reasons + [
-                    f"Genişleme çok fazla VE momentum zayıf: son 1h taban/tepeden %{extension_pct:.1f} "
-                    f"uzaklaşmış (eşik %{self._cfg.max_extension_pct:.0f}), timing_score={timing_score:.1f}/"
-                    f"{self._cfg.timing_weight:.0f} — hareket tükenmiş görünüyor, geç kalınmış",
-                ],
+                reasons=reasons + [f"{reason}, timing_score={timing_score:.1f}/{self._cfg.timing_weight:.0f} "
+                                    "— hareket tükenmiş görünüyor, geç kalınmış"],
             )
-        if extension_pct > self._cfg.max_extension_pct and momentum_still_strong:
+        if (extension_pct > self._cfg.max_extension_pct or streak_into_resistance) and momentum_still_strong:
             reasons.append(
-                f"Uzak (%{extension_pct:.1f}) ama momentum hâlâ güçlü (timing_score={timing_score:.1f}) "
-                f"— hareket devam ediyor sayılıp REDDEDİLMEDİ"
+                f"Uzak/dirence yakın (%{extension_pct:.1f}, streak={streak_1h}) ama momentum hâlâ güçlü "
+                f"(timing_score={timing_score:.1f}) — hareket devam ediyor sayılıp REDDEDİLMEDİ"
             )
 
         suggested_entry_price = candles_1m[-1].close if candles_1m else None
