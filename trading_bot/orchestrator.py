@@ -23,7 +23,13 @@ import logging
 import time
 
 from .analyzer import MultiTimeframeAnalyzer
-from .analyzer.price_action import Trend, compute_atr, detect_structure_break, find_swing_points
+from .analyzer.price_action import (
+    Trend,
+    compute_atr,
+    detect_structure_break,
+    find_swing_points,
+    same_direction_streak,
+)
 from .config import RiskConfig
 from .data_layer import DataLayer
 from .execution import BinanceFuturesTradingClient, DryRunExecutionEngine, ExecutionEngine
@@ -220,6 +226,10 @@ class Orchestrator:
         safety = self._liquidation_engine.check_entry_safety(symbol, tracked.side, entry_price)
         if not safety.is_safe:
             return
+        confirmed, reason = self._confirm_immediate_entry(symbol, tracked.side)
+        if not confirmed:
+            logger.info("%s: yeniden giriş son-saniye teyidinde reddedildi -> %s", symbol, reason)
+            return
 
         assert self._execution_engine is not None
         try:
@@ -319,6 +329,11 @@ class Orchestrator:
                 return
 
             await self._close_position(riskiest.symbol, reason="daha_büyük_fırsat_için_slot_boşaltıldı")
+
+        confirmed, confirm_reason = self._confirm_immediate_entry(symbol, signal.side)
+        if not confirmed:
+            logger.info("%s: son-saniye teyidinde reddedildi -> %s", symbol, confirm_reason)
+            return
 
         assert self._execution_engine is not None
         try:
@@ -582,6 +597,46 @@ class Orchestrator:
             return ob.mid_price
         candles = self._data_layer.get_klines(symbol, "1m", limit=1)
         return candles[-1].close if candles else None
+
+    def _confirm_immediate_entry(self, symbol: str, side: str) -> tuple[bool, str]:
+        """Giriş emrini göndermeden HEMEN önceki son-saniye teyidi. İki şeye
+        bakar:
+        1) Son birkaç 1m mum gerçekten işlem yönünde mi (sadece 4h/1h'nin
+           'onaylı' demesi yetmiyor — 1m'de an itibariyle tersine dönmüş
+           olabilir).
+        2) Orderbook, giriş yönümüzü destekliyor mu (karşı taraf ezici
+           şekilde ağır basıyorsa, girer girmez fiyat tersine gidebilir).
+        İkisinden biri başarısız olursa giriş YAPILMAZ."""
+        cfg = self._liquidation_engine.cfg  # LiquidationConfig — eşikler burada
+
+        candles_1m = self._data_layer.get_klines(symbol, "1m", limit=cfg.confirm_1m_lookback)
+        if not candles_1m:
+            return False, "1m veri yok"
+        streak = same_direction_streak(candles_1m, side, max_lookback=cfg.confirm_1m_lookback)
+        if streak < cfg.min_1m_confirming_candles:
+            return False, (
+                f"1m momentum teyit etmiyor (son {cfg.confirm_1m_lookback} mumdan sadece {streak}'ü "
+                f"{side} yönünde, gereken >= {cfg.min_1m_confirming_candles})"
+            )
+
+        ob = self._data_layer.get_orderbook(symbol)
+        if ob is None or not ob.bids or not ob.asks:
+            return False, "orderbook verisi yok"
+        bid_vol = sum(lv.quantity for lv in ob.bids)
+        ask_vol = sum(lv.quantity for lv in ob.asks)
+        total = bid_vol + ask_vol
+        if total <= 0:
+            return False, "orderbook derinliği boş"
+        supporting_ratio = (bid_vol / total) if side == "LONG" else (ask_vol / total)
+        if supporting_ratio < cfg.min_supporting_depth_ratio:
+            opposing = "satıcılar" if side == "LONG" else "alıcılar"
+            return False, (
+                f"orderbook ters yöne ağır basıyor ({opposing} derinliğin %"
+                f"{(1 - supporting_ratio) * 100:.0f}'i) — destekleyen taraf oranı %{supporting_ratio*100:.0f} "
+                f"(gereken >= %{cfg.min_supporting_depth_ratio*100:.0f})"
+            )
+
+        return True, "onaylandı"
 
     def _detect_reversal(self, symbol: str, position_side: str, trend_mode: bool = False) -> bool:
         """Pozisyonun TERSİ yönde CHoCH var mı — zirve/tükeniş sezgisi.
