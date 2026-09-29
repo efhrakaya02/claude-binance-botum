@@ -26,6 +26,7 @@ from .analyzer import MultiTimeframeAnalyzer
 from .analyzer.price_action import (
     Trend,
     compute_atr,
+    detect_pullback_reversal,
     detect_structure_break,
     find_swing_points,
     same_direction_streak,
@@ -318,6 +319,21 @@ class Orchestrator:
             #    doğrudan çelişir; kazanan bir işlemi yeni/kanıtlanmamış bir
             #    sinyal için bırakmıyoruz.
             if riskiest.trailing_active:
+                return
+
+            # 2b) "Henüz kanıtlanmamış" (trailing_active=False) olması TEK
+            #     BAŞINA yeterli değil — SPKUSDT/ZKUSDT'de gözlemlendiği gibi,
+            #     bu tek şartla max_concurrent_positions=1 iken iki sembol
+            #     5 dakikada bir birbirini "daha büyük fırsat" diye kapatıp
+            #     sonsuz bir döngüye giriyordu. Mevcut pozisyonun kendi
+            #     momentum skoru da GERÇEKTEN zayıf olmalı — sadece erken
+            #     olması değil, objektif olarak zayıflamış/hiç güçlenmemiş
+            #     olması gerekiyor.
+            riskiest_momentum = self._analyzer.timing_score_for(riskiest.symbol, riskiest.side)
+            riskiest_still_strong = riskiest_momentum >= (
+                self._analyzer.cfg.extension_momentum_override_ratio * self._analyzer.cfg.timing_weight
+            )
+            if riskiest_still_strong:
                 return
 
             # 3) Eşik, actionable_confidence_threshold'un ZORUNLU olarak
@@ -618,6 +634,21 @@ class Orchestrator:
                 f"1m momentum teyit etmiyor (son {cfg.confirm_1m_lookback} mumdan sadece {streak}'ü "
                 f"{side} yönünde, gereken >= {cfg.min_1m_confirming_candles})"
             )
+
+        # 5m'de "düzeltme/spike sonrası dönüş mumu" formasyonu — sadece
+        # momentum zayıf değil demek yetmez, düzeltmenin bittiğini gösteren
+        # somut bir toparlanma/dönüş mumunun görülmesi gerekiyor.
+        if cfg.require_pullback_reversal_pattern:
+            candles_5m = self._data_layer.get_klines(symbol, "5m")
+            if not candles_5m or not detect_pullback_reversal(
+                candles_5m, side, lookback=cfg.pullback_reversal_lookback
+            ):
+                pattern = "toparlanma mumu" if side == "LONG" else "dönüş mumu"
+                return False, (
+                    f"5m'de düzeltme/spike sonrası net {pattern} formasyonu yok "
+                    f"(önceki {cfg.pullback_reversal_lookback} mumluk pencere ters yönde ilerlememiş "
+                    f"veya son mum net dönüş göstermiyor)"
+                )
 
         ob = self._data_layer.get_orderbook(symbol)
         if ob is None or not ob.bids or not ob.asks:
