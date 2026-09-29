@@ -164,3 +164,31 @@ def same_direction_streak(candles: list[Candle], side: str, max_lookback: int = 
             break
         streak += 1
     return streak
+
+
+def detect_pullback_reversal(candles: list[Candle], side: str, lookback: int = 6) -> bool:
+    """Düzeltme/spike sonrası dönüş formasyonu:
+    - LONG: son mum HARİÇ önceki `lookback` mumluk pencere net DÜŞÜŞTE
+      olmalı (düzeltme/geri çekilme gerçekten yaşanmış olmalı), ARDINDAN
+      son mum net bir TOPARLANMA mumu olmalı (yeşil VE bir önceki mumun
+      kapanışından yüksek — sadece doji değil, gerçek bir dönüş).
+    - SHORT: pencere net YÜKSELİŞTE (ani çıkış/spike) olmalı, son mum net
+      bir DÖNÜŞ mumu (kırmızı VE bir önceki kapanıştan düşük) olmalı.
+
+    Sadece "momentum zayıf değil" demek yetmiyor — burada AKTİF olarak
+    'düzeltme/spike bitti, tersine döndü' formasyonunun kendisi aranıyor."""
+    if len(candles) < lookback + 1:
+        return False
+    window = candles[-(lookback + 1):-1]
+    signal_candle = candles[-1]
+    prior_candle = candles[-2]
+    window_net_change = window[-1].close - window[0].open
+
+    if side == "LONG":
+        pullback_happened = window_net_change < 0
+        recovery_candle = signal_candle.close > signal_candle.open and signal_candle.close > prior_candle.close
+        return pullback_happened and recovery_candle
+    else:
+        spike_happened = window_net_change > 0
+        reversal_candle = signal_candle.close < signal_candle.open and signal_candle.close < prior_candle.close
+        return spike_happened and reversal_candle
