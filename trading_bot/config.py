@@ -204,3 +204,9 @@ class LiquidationConfig:
     # yönüyle aynı renkte olması gerektiği (en yeni mum her zaman dahil).
     min_1m_confirming_candles: int = 4
     confirm_1m_lookback: int = 5
+    # Son-saniye teyidinde ayrıca 5m'de "düzeltme/spike sonrası dönüş mumu"
+    # formasyonu aranır (LONG: geri çekilme + toparlanma mumu, SHORT: ani
+    # yükseliş + dönüş mumu). Çok az giriş olursa (bot fazla seçici olursa)
+    # buradan False yapılarak gevşetilebilir.
+    require_pullback_reversal_pattern: bool = True
+    pullback_reversal_lookback: int = 6
