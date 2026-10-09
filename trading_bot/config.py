@@ -125,6 +125,15 @@ class RiskConfig:
     # tutulup akıllı yeniden giriş için değerlendirilir. Bu süre dolunca
     # tamamen terk edilir (normal TTL budamasına döner).
     max_tracking_minutes: float = 60.0
+    # ORCAUSDT olayı (2026-09-30): aynı coine saatlerce, bazen kapanıştan
+    # 8 saniye sonra yeniden giriliyordu — çünkü yeniden giriş kararı SADECE
+    # kısa vadeli (15m/5m/1m) momentum skoruna bakıyordu, 4h/1h'deki genel
+    # yapının hâlâ geçerli olup olmadığını hiç sormuyordu. Üç sınır eklendi:
+    # (1) kapanıştan sonra asgari bekleme, (2) aynı fırsatta en fazla kaç kez
+    # yeniden girilebileceği, (3) yeniden girişte de 4h/1h'nin (macro) hâlâ
+    # aynı yönü doğrulaması zorunlu.
+    min_reentry_gap_seconds: float = 180.0  # kapanıştan sonra en az 3dk bekle
+    max_reentries_per_tracking: int = 2  # aynı fırsatta en fazla 2 kez yeniden giriş
     # Binance'teki GERÇEK stop emrini güncelleme sıklığı sınırı — botun kendi
     # dahili kontrolü her tick'te (saniyeler içinde) çalışmaya devam eder,
     # bu sadece borsadaki YEDEK emrin ne sıklıkla senkronize edileceğini
