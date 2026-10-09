@@ -209,6 +209,39 @@ class Orchestrator:
         if tracked is None:
             return
 
+        # (1) Kapanıştan sonra asgari bekleme — ORCAUSDT olayında kapanıştan
+        #     8 saniye sonra bile yeniden giriliyordu. Gerçek bir "fırsat
+        #     devam ediyor" kararı, anlık bir ölçümden değil en az birkaç
+        #     dakikalık bir gözlemden gelmeli.
+        gap_seconds = (now_ms - tracked.tracked_since_ms) / 1000
+        if gap_seconds < self._risk_cfg.min_reentry_gap_seconds:
+            return
+
+        # (2) Aynı fırsatta sınırsız yeniden giriş yok — kaç kez denenirse
+        #     denensin bir coin'de takılı kalınmasın, sermaye başka
+        #     fırsatlara da gidebilsin.
+        if tracked.original_position.reentry_count >= self._risk_cfg.max_reentries_per_tracking:
+            self._position_manager.abandon_tracking(symbol)
+            logger.info(
+                "%s: aynı fırsatta yeniden giriş sınırına (%d) ulaşıldı, tamamen terk edildi",
+                symbol, self._risk_cfg.max_reentries_per_tracking,
+            )
+            return
+
+        # (3) KRİTİK: yeniden girişte de 4h/1h (makro) yapının hâlâ AYNI
+        #     yönü doğrulaması zorunlu — sadece kısa vadeli (15m/5m/1m)
+        #     momentum skoruna bakmak yetmiyordu. Bir coin RANGE'e girmiş
+        #     veya yön değiştirmiş olsa bile, ufak bir kıpırdanma "momentum
+        #     güçlü" sayılıp aynı coine saatlerce takılı kalınabiliyordu.
+        fresh_signal = self._analyzer.analyze(symbol)
+        if fresh_signal is None or not fresh_signal.macro_confirmed or fresh_signal.side != tracked.side:
+            self._position_manager.abandon_tracking(symbol)
+            logger.info(
+                "%s: makro yapı artık %s yönünü doğrulamıyor, fırsat terk edildi",
+                symbol, tracked.side,
+            )
+            return
+
         # (a) Momentum HÂLÂ objektif olarak güçlü mü — gerçek bir düzeltme hiç
         #     başlamamış olabilir, bu durumda beklemeye gerek yok.
         momentum_strong = self._analyzer.timing_score_for(symbol, tracked.side) >= (
