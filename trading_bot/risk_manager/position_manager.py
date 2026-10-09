@@ -33,6 +33,7 @@ erken fazda yanlışlıkla "dönüş" sayılıp pozisyonu erken kapatmasın diye
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 from ..config import RiskConfig
@@ -116,6 +117,12 @@ class PositionManager:
         if position is None:
             return None
         position.status = PositionStatus.CLOSED
+        # KRİTİK: bu hiç set edilmiyordu — track_for_resumption()'daki
+        # tracked_since_ms buna dayanıyor (position.closed_at_ms or 0), yani
+        # eksikken her izlenen fırsat "sonsuz zaman önce kapanmış" sayılıp
+        # ANINDA terk ediliyordu — min_reentry_gap_seconds/max_tracking_minutes
+        # gibi tüm zamana dayalı korumaları etkisiz kılıyordu.
+        position.closed_at_ms = int(time.time() * 1000)
         position.realized_pnl_usdt = self._unrealized_pnl_usdt(position, close_price)
         logger.info("Pozisyon kapatıldı: %s (%s) pnl=%.2f USDT", symbol, reason, position.realized_pnl_usdt)
         return position
